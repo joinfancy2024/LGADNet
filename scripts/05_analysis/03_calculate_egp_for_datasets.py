@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Calculate EGP for LGADNet datasets."""
+"""Calculate EGP for the training datasets (selected-samples, train, val).
+
+The final CEMP catalog already carries an EGP column (computed in 04_validate by
+03_calculate_egp and exported by 04_export_final_catalog), so it is not recomputed
+here. This script only adds EGP to the three LGADNet training related samples used
+in the EGP comparison figures.
+"""
 
 from __future__ import annotations
 
@@ -22,36 +28,15 @@ TARGET_WAVELENGTHS = np.arange(WAVELENGTH_SCOPE[0], WAVELENGTH_SCOPE[1] + 1, 1)
 EGP_NUMERATOR_RANGE = (4200, 4400)
 EGP_DENOMINATOR_RANGE = (4425, 4520)
 
-ROOT_DIR = Path("/home/DM13/workspace/sky")
-LGADNET_ROOT = ROOT_DIR / "data/new_dataset3/lgadnet"
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")   # <-- EDIT THIS root
 
-DEFAULT_SELECTED_INPUT = (
-    LGADNET_ROOT / "regression_snr5_selected_v6_cemp3020_20260611/selected_all.csv"
-)
-DEFAULT_SELECTED_OUTPUT = (
-    LGADNET_ROOT / "regression_snr5_selected_v6_cemp3020_20260611/selected_all_with_egp.csv"
-)
-DEFAULT_TRAIN_INPUT = (
-    LGADNET_ROOT / "regression_snr5_selected_v6_cemp3020_20260611/new_dataset_train_y.csv"
-)
-DEFAULT_TRAIN_OUTPUT = (
-    LGADNET_ROOT / "regression_snr5_selected_v6_cemp3020_20260611/new_dataset_train_y_with_egp.csv"
-)
-DEFAULT_VAL_INPUT = (
-    LGADNET_ROOT / "regression_snr5_selected_v6_cemp3020_20260611/new_dataset_val_y.csv"
-)
-DEFAULT_VAL_OUTPUT = (
-    LGADNET_ROOT / "regression_snr5_selected_v6_cemp3020_20260611/new_dataset_val_y_with_egp.csv"
-)
-DEFAULT_FINAL_INPUT = (
-    LGADNET_ROOT / "final_validated/cemp_final_validated.csv"
-)
-DEFAULT_UPSTREAM_INPUT = (
-    LGADNET_ROOT / "spatial_filtering_unique/cemp_unique_b_greater_30.csv"
-)
-DEFAULT_FINAL_OUTPUT = (
-    LGADNET_ROOT / "final_validated/cemp_final_validated_with_egp.csv"
-)
+# Defaults below: dataset files produced by 01_prepare_training_dataset.py (train/val/selected).
+DEFAULT_SELECTED_INPUT = LGADNET_ROOT / "lgadnet_dataset" / "selected_samples.csv"
+DEFAULT_SELECTED_OUTPUT = LGADNET_ROOT / "lgadnet_dataset" / "selected_samples_with_egp.csv"
+DEFAULT_TRAIN_INPUT = LGADNET_ROOT / "lgadnet_dataset" / "train_labels.csv"
+DEFAULT_TRAIN_OUTPUT = LGADNET_ROOT / "lgadnet_dataset" / "train_labels_with_egp.csv"
+DEFAULT_VAL_INPUT = LGADNET_ROOT / "lgadnet_dataset" / "val_labels.csv"
+DEFAULT_VAL_OUTPUT = LGADNET_ROOT / "lgadnet_dataset" / "val_labels_with_egp.csv"
 
 
 def log(message: str) -> None:
@@ -66,21 +51,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-output", type=Path, default=DEFAULT_TRAIN_OUTPUT)
     parser.add_argument("--val-input", type=Path, default=DEFAULT_VAL_INPUT)
     parser.add_argument("--val-output", type=Path, default=DEFAULT_VAL_OUTPUT)
-    parser.add_argument("--final-input", type=Path, default=DEFAULT_FINAL_INPUT)
-    parser.add_argument("--upstream-input", type=Path, default=DEFAULT_UPSTREAM_INPUT)
-    parser.add_argument("--final-output", type=Path, default=DEFAULT_FINAL_OUTPUT)
     parser.add_argument("--limit", type=int, default=None, help="Process only the first N rows.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs.")
-    parser.add_argument("--skip-selected", action="store_true", help="Skip selected_all dataset.")
+    parser.add_argument("--skip-selected", action="store_true", help="Skip the selected-samples dataset.")
     parser.add_argument("--skip-train", action="store_true", help="Skip train dataset.")
     parser.add_argument("--skip-val", action="store_true", help="Skip val dataset.")
-    parser.add_argument("--skip-final", action="store_true", help="Skip final_validated dataset.")
     return parser.parse_args()
 
 
 def require_overwrite(path: Path, overwrite: bool) -> None:
     if path.exists() and not overwrite:
-        raise FileExistsError(f"输出文件已存在；如需覆盖请加 --overwrite: {path}")
+        raise FileExistsError(f"Output file already exists; use --overwrite to replace: {path}")
 
 
 def get_egp(
@@ -221,7 +202,7 @@ def process_direct_dataset(
     limit: int | None,
     overwrite: bool,
 ) -> dict:
-    """Process a dataset directly (selected_all, train, val)."""
+    """Process a dataset directly (selected-samples, train, val)."""
     require_overwrite(output_csv, overwrite)
 
     df = pd.read_csv(input_csv)
@@ -231,9 +212,9 @@ def process_direct_dataset(
             path_column = candidate
             break
     if path_column is None:
-        raise ValueError(f"{input_csv} 缺少 source_path / fits_source_path 列")
+        raise ValueError(f"{input_csv} is missing the source_path / fits_source_path column")
     if "z" not in df.columns:
-        raise ValueError(f"{input_csv} 缺少 z 列")
+        raise ValueError(f"{input_csv} is missing the z column")
 
     work = df.copy()
     if limit is not None:
@@ -270,127 +251,48 @@ def process_direct_dataset(
     return stats
 
 
-def process_final_validated_dataset(
-    final_csv: Path,
-    upstream_csv: Path,
-    output_csv: Path,
-    limit: int | None,
-    overwrite: bool,
-) -> dict:
-    """Process final_validated dataset (needs upstream to recover FITS paths)."""
-    require_overwrite(output_csv, overwrite)
-
-    final_df = pd.read_csv(final_csv)
-    if "candidate_id" not in final_df.columns:
-        raise ValueError(f"{final_csv} 缺少 candidate_id 列")
-    if "z" not in final_df.columns:
-        raise ValueError(f"{final_csv} 缺少 z 列")
-
-    upstream = pd.read_csv(upstream_csv, usecols=["candidate_id", "obsid", "filename", "source_path"])
-
-    final_df["candidate_id"] = pd.to_numeric(final_df["candidate_id"], errors="coerce")
-    upstream["candidate_id"] = pd.to_numeric(upstream["candidate_id"], errors="coerce")
-    if final_df["candidate_id"].isna().any():
-        raise ValueError(f"{final_csv} 中存在无法转换为数值的 candidate_id")
-    if upstream["candidate_id"].isna().any():
-        raise ValueError(f"{upstream_csv} 中存在无法转换为数值的 candidate_id")
-
-    final_df["candidate_id"] = final_df["candidate_id"].astype("int64")
-    upstream["candidate_id"] = upstream["candidate_id"].astype("int64")
-
-    merged = final_df.merge(upstream, on="candidate_id", how="left", validate="one_to_one")
-    missing = int(merged["source_path"].isna().sum())
-    if missing:
-        raise ValueError(f"回溯 FITS 路径失败: 缺失 {missing} 条 source_path")
-
-    if limit is not None:
-        merged = merged.head(limit).copy()
-
-    merged["EGP"] = np.nan
-    merged["EGP_status"] = "pending"
-
-    error_counts: dict[str, int] = {}
-    for idx, row in tqdm(merged.iterrows(), total=len(merged), desc=final_csv.name):
-        path = Path(str(row["source_path"]))
-        egp, status = preprocess_spectrum_for_egp(path, float(row["z"]))
-        if egp is None:
-            error_counts[status] = error_counts.get(status, 0) + 1
-            merged.at[idx, "EGP_status"] = status
-            continue
-
-        merged.at[idx, "EGP"] = egp
-        merged.at[idx, "EGP_status"] = status
-
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_csv(output_csv, index=False)
-
-    egp_values = merged["EGP"].dropna()
-    stats = {
-        "total": int(len(merged)),
-        "success": int(merged["EGP"].notna().sum()),
-        "failed": int(merged["EGP"].isna().sum()),
-        "error_counts": error_counts,
-        "egp_mean": float(egp_values.mean()) if len(egp_values) > 0 else None,
-        "egp_std": float(egp_values.std()) if len(egp_values) > 0 else None,
-        "egp_median": float(egp_values.median()) if len(egp_values) > 0 else None,
-    }
-    return stats
-
-
-def main() -> None:
+def main() -> int:
     args = parse_args()
 
     if not args.skip_selected:
-        log(f"处理 selected_all: {args.selected_input}")
+        log(f"Processing selected-samples file: {args.selected_input}")
         stats = process_direct_dataset(
             input_csv=args.selected_input,
             output_csv=args.selected_output,
             limit=args.limit,
             overwrite=args.overwrite,
         )
-        log(f"完成: success={stats['success']}/{stats['total']}, failed={stats['failed']}")
-        log(f"EGP: mean={stats['egp_mean']:.3f}, std={stats['egp_std']:.3f}, median={stats['egp_median']:.3f}" if stats['egp_mean'] else "EGP: 无有效数据")
-        log(f"输出: {args.selected_output}")
+        log(f"Done: success={stats['success']}/{stats['total']}, failed={stats['failed']}")
+        log(f"EGP: mean={stats['egp_mean']:.3f}, std={stats['egp_std']:.3f}, median={stats['egp_median']:.3f}" if stats['egp_mean'] else "EGP: no valid data")
+        log(f"Output: {args.selected_output}")
 
     if not args.skip_train:
-        log(f"处理 train: {args.train_input}")
+        log(f"Processing train: {args.train_input}")
         stats = process_direct_dataset(
             input_csv=args.train_input,
             output_csv=args.train_output,
             limit=args.limit,
             overwrite=args.overwrite,
         )
-        log(f"完成: success={stats['success']}/{stats['total']}, failed={stats['failed']}")
-        log(f"EGP: mean={stats['egp_mean']:.3f}, std={stats['egp_std']:.3f}, median={stats['egp_median']:.3f}" if stats['egp_mean'] else "EGP: 无有效数据")
-        log(f"输出: {args.train_output}")
+        log(f"Done: success={stats['success']}/{stats['total']}, failed={stats['failed']}")
+        log(f"EGP: mean={stats['egp_mean']:.3f}, std={stats['egp_std']:.3f}, median={stats['egp_median']:.3f}" if stats['egp_mean'] else "EGP: no valid data")
+        log(f"Output: {args.train_output}")
 
     if not args.skip_val:
-        log(f"处理 val: {args.val_input}")
+        log(f"Processing val: {args.val_input}")
         stats = process_direct_dataset(
             input_csv=args.val_input,
             output_csv=args.val_output,
             limit=args.limit,
             overwrite=args.overwrite,
         )
-        log(f"完成: success={stats['success']}/{stats['total']}, failed={stats['failed']}")
-        log(f"EGP: mean={stats['egp_mean']:.3f}, std={stats['egp_std']:.3f}, median={stats['egp_median']:.3f}" if stats['egp_mean'] else "EGP: 无有效数据")
-        log(f"输出: {args.val_output}")
+        log(f"Done: success={stats['success']}/{stats['total']}, failed={stats['failed']}")
+        log(f"EGP: mean={stats['egp_mean']:.3f}, std={stats['egp_std']:.3f}, median={stats['egp_median']:.3f}" if stats['egp_mean'] else "EGP: no valid data")
+        log(f"Output: {args.val_output}")
 
-    if not args.skip_final:
-        log(f"处理 final_validated: {args.final_input}")
-        stats = process_final_validated_dataset(
-            final_csv=args.final_input,
-            upstream_csv=args.upstream_input,
-            output_csv=args.final_output,
-            limit=args.limit,
-            overwrite=args.overwrite,
-        )
-        log(f"完成: success={stats['success']}/{stats['total']}, failed={stats['failed']}")
-        log(f"EGP: mean={stats['egp_mean']:.3f}, std={stats['egp_std']:.3f}, median={stats['egp_median']:.3f}" if stats['egp_mean'] else "EGP: 无有效数据")
-        log(f"输出: {args.final_output}")
+    log("All done")
 
-    log("全部完成")
-
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

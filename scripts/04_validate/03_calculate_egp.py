@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Calculate EGP for spatial filtering candidates.
+Calculate EGP for the final CEMP candidates.
 
-Input: bailer_jones_distance_uncertainty_flags.csv
-Output: bailer_jones_distance_uncertainty_flags_with_egp.csv
+Input: cemp_bj_robust_after_apogee.csv
+Output: cemp_bj_robust_after_apogee_with_egp.csv
 """
 
 from __future__ import annotations
@@ -28,18 +28,11 @@ EGP_NUMERATOR_RANGE = (4200, 4400)
 EGP_DENOMINATOR_RANGE = (4425, 4520)
 
 
-INPUT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/bailer_jones_distance_uncertainty_flags.csv"
-)
-UPSTREAM = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_unique_b_greater_30.csv"
-)
-OUTPUT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/bailer_jones_distance_uncertainty_flags_with_egp.csv"
-)
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")   # <-- EDIT THIS root
+DATA = LGADNET_ROOT
+
+INPUT = DATA / "spatial_filtering_unique" / "cemp_bj_robust_after_apogee.csv"
+OUTPUT = DATA / "spatial_filtering_unique" / "cemp_bj_robust_after_apogee_with_egp.csv"
 
 
 def log(message: str) -> None:
@@ -180,22 +173,10 @@ def preprocess_spectrum_for_egp(
 
 def main() -> int:
     log(f"Reading input: {INPUT}")
-    df = pd.read_csv(INPUT, engine="python")
+    merged = pd.read_csv(INPUT, engine="python")
 
-    log(f"Reading upstream for FITS paths: {UPSTREAM}")
-    upstream = pd.read_csv(UPSTREAM, usecols=["candidate_id", "source_path", "z"], engine="python")
-
-    # Ensure candidate_id is unique in upstream (defensive)
-    if upstream["candidate_id"].nunique() != len(upstream):
-        log(f"Warning: UPSTREAM has duplicate candidate_id, keeping first occurrence")
-        upstream = upstream.drop_duplicates(subset="candidate_id", keep="first")
-
-    # Ensure candidate_id is consistent type
-    df["candidate_id"] = pd.to_numeric(df["candidate_id"], errors="coerce").astype("Int64")
-    upstream["candidate_id"] = pd.to_numeric(upstream["candidate_id"], errors="coerce").astype("Int64")
-
-    log(f"Merging FITS paths and redshifts...")
-    merged = df.merge(upstream, on="candidate_id", how="left")
+    if "candidate_id" in merged.columns:
+        merged["candidate_id"] = pd.to_numeric(merged["candidate_id"], errors="coerce").astype("Int64")
 
     missing = int(merged["source_path"].isna().sum())
     if missing > 0:

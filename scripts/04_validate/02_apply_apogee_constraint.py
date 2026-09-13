@@ -9,7 +9,6 @@ Input:
 
 Outputs:
     cemp_bj_robust_after_apogee.csv
-    cemp_bj_robust_apogee_summary.txt
 """
 
 from __future__ import annotations
@@ -22,24 +21,14 @@ import pandas as pd
 from astropy.coordinates import SkyCoord
 
 
-INPUT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_cmd_flags.csv"
-)
-APOGEE_FILE = Path("/home/DM13/workspace/sky/data/apogee_dr17.csv")
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")   # <-- EDIT THIS root
+DATA = LGADNET_ROOT
 
-OUTPUT_CSV = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_after_apogee.csv"
-)
-OUTPUT_MATCHED_CSV = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_apogee_matches.csv"
-)
-OUTPUT_REPORT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_apogee_summary.txt"
-)
+INPUT = DATA / "spatial_filtering_unique" / "cemp_bj_robust_cmd_flags.csv"
+APOGEE_FILE = LGADNET_ROOT / "apogee_dr17.csv"
+
+OUTPUT_CSV = DATA / "spatial_filtering_unique" / "cemp_bj_robust_after_apogee.csv"
+OUTPUT_MATCHED_CSV = DATA / "spatial_filtering_unique" / "cemp_bj_robust_apogee_matches.csv"
 
 MATCH_RADIUS_ARCSEC = 3.0
 APOGEE_FEH_THRESHOLD = -1.0
@@ -203,13 +192,11 @@ def main() -> int:
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     final_kept.to_csv(OUTPUT_CSV, index=False)
     matched.to_csv(OUTPUT_MATCHED_CSV, index=False)
-    OUTPUT_REPORT.write_text(report, encoding="utf-8")
 
     print(report)
     print("=" * 80)
     print(f"Output final CSV: {OUTPUT_CSV}")
     print(f"Output matched CSV: {OUTPUT_MATCHED_CSV}")
-    print(f"Output report: {OUTPUT_REPORT}")
 
     return 0
 

@@ -6,3 +6,6 @@
 *.png
 *.log
 __pycache__/
+
+# Chinese working copy (not published; repo is English-only)
+README_zh.md

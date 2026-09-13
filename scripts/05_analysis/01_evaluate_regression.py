@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""用 LGADNet checkpoint 在验证集上做四参数回归评估并生成散点图。"""
+"""Evaluate the four-parameter regression on the validation set using an LGADNet
+checkpoint and produce scatter plots."""
 
 from __future__ import annotations
 
@@ -17,14 +18,15 @@ from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
-ROOT_DIR = Path("/home/DM13/workspace/sky")
-LGADNET_DIR = ROOT_DIR / "data/new_dataset3/lgadnet"
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(LGADNET_DIR) not in sys.path:
-    sys.path.insert(0, str(LGADNET_DIR))
+# The LGADNet model class lives in the prediction script. Expose
+# scripts/02_predict on sys.path and load it (numeric filename -> importlib).
+import importlib
 
-from pipelines.train.train_lgadnet import LGADNet
+_PREDICT_DIR = Path(__file__).resolve().parents[1] / "02_predict"
+if str(_PREDICT_DIR) not in sys.path:
+    sys.path.insert(0, str(_PREDICT_DIR))
+_predict = importlib.import_module("01_predict_lgadnet_dr12")  # name starts with a digit
+LGADNet = _predict.LGADNet
 
 
 def set_seed(seed: int) -> None:
@@ -43,12 +45,12 @@ class CustomDataset(Dataset):
         label_df = pd.read_csv(label_path)
         self.labels = label_df[["LOGG", "TEFF", "C_FE", "FE_H"]].values.astype(np.float32)
 
-        # 过滤 NaN 样本（在加载时过滤）
+        # drop samples containing NaN (filtered on load)
         valid_mask = np.all(np.isfinite(self.features), axis=1) & np.all(np.isfinite(self.labels), axis=1)
         self.features = self.features[valid_mask]
         self.labels = self.labels[valid_mask]
         self.valid_indices = np.where(valid_mask)[0]
-        print(f"[INFO] 过滤 NaN 样本: 原始 {len(valid_mask)} -> 保留 {len(self.valid_indices)} (丢弃 {len(valid_mask) - len(self.valid_indices)})")
+        print(f"[INFO] Dropped NaN samples: {len(valid_mask)} -> kept {len(self.valid_indices)} (removed {len(valid_mask) - len(self.valid_indices)})")
 
         if normalize:
             self.label_mean = np.mean(self.labels, axis=0)
@@ -78,16 +80,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=2024)
-    parser.add_argument("--output-pdf", type=Path, required=True, help="输出PDF文件路径")
+    parser.add_argument("--output-pdf", type=Path, required=True, help="path of the output PDF file")
     return parser.parse_args()
 
 
 def plot_scatter(true_values: np.ndarray, pred_values: np.ndarray, output_pdf: Path) -> None:
-    """生成四参数对比散点图（密度加权颜色）。"""
-    param_names = ["$\log g$", "$T_{\\mathrm{eff}}$", "[C/Fe]", "[Fe/H]"]
+    """Produce four-parameter comparison scatter plots with density-weighted colour."""
+    param_names = [r"$\log g$", r"$T_{\mathrm{eff}}$", "[C/Fe]", "[Fe/H]"]
     units = ["dex", "K", "dex", "dex"]
 
-    # 设置绘图样式
+    # plotting style
     plt.rcParams['font.size'] = 11
     plt.rcParams['axes.linewidth'] = 1.2
     plt.rcParams['figure.dpi'] = 150
@@ -98,7 +100,7 @@ def plot_scatter(true_values: np.ndarray, pred_values: np.ndarray, output_pdf: P
         true = true_values[:, idx]
         pred = pred_values[:, idx]
 
-        # 计算误差统计
+        # error statistics
         mae = mean_absolute_error(true, pred)
         rmse = np.sqrt(mean_squared_error(true, pred))
         r2 = r2_score(true, pred)
@@ -107,47 +109,47 @@ def plot_scatter(true_values: np.ndarray, pred_values: np.ndarray, output_pdf: P
         std_res = np.std(residuals)
         sigma_3 = std_res * 3
 
-        # 计算密度（使用 2D 直方图快速估计）
+        # estimate density from a 2D histogram
         nbins = 100
         H, xedges, yedges = np.histogram2d(true, pred, bins=nbins)
 
-        # 计算每个点所在的网格索引
+        # grid cell of each point
         xidx = np.clip(np.digitize(true, xedges) - 1, 0, nbins-1)
         yidx = np.clip(np.digitize(pred, yedges) - 1, 0, nbins-1)
 
-        # 获取每个点的密度
+        # per-point density
         density = H[xidx, yidx]
 
-        # 归一化密度
+        # normalise density
         density_norm = (density - density.min()) / (density.max() - density.min())
 
-        # 根据密度排序（密度低的先绘制,密度高的后绘制）
+        # draw low-density points first, high-density points last
         sorted_idx = np.argsort(density_norm)
         x_sorted = true[sorted_idx]
         y_sorted = pred[sorted_idx]
         density_sorted = density_norm[sorted_idx]
 
-        # 绘制散点图,根据密度调整颜色
+        # scatter with colour by density
         ax.scatter(x_sorted, y_sorted,
                   c=density_sorted,
-                  cmap='coolwarm',  # 蓝色到红色
+                  cmap='coolwarm',  # blue to red
                   s=10,
                   alpha=0.6,
                   edgecolors='none',
                   rasterized=True)
 
-        # 1:1 参考线（黑色虚线）
+        # 1:1 reference line (black dashed)
         min_val = min(true.min(), pred.min())
         max_val = max(true.max(), pred.max())
         ax.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2, alpha=0.8, label='1:1 line')
 
-        # 3-sigma 线（绿色虚线）
+        # 3-sigma lines (green dashed)
         ax.plot([min_val, max_val], [min_val + sigma_3, max_val + sigma_3],
                'g--', linewidth=1.5, alpha=0.7, label=f'+3σ')
         ax.plot([min_val, max_val], [min_val - sigma_3, max_val - sigma_3],
                'g--', linewidth=1.5, alpha=0.7, label=f'-3σ')
 
-        # 统计信息文本框
+        # statistics text box
         textstr = f'MAE = {mae:.3f}\n'
         textstr += f'RMSE = {rmse:.3f}\n'
         textstr += f'Bias = {bias:.3f}\n'
@@ -165,19 +167,19 @@ def plot_scatter(true_values: np.ndarray, pred_values: np.ndarray, output_pdf: P
 
     plt.tight_layout()
     fig.savefig(output_pdf, dpi=300, bbox_inches='tight', facecolor='white')
-    # 同时保存 PNG 格式
+    # also save a PNG copy
     png_path = output_pdf.with_suffix('.png')
     fig.savefig(png_path, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close()
-    print(f"✓ PDF 已保存: {output_pdf}")
-    print(f"✓ PNG 已保存: {png_path}")
+    print(f"Saved PDF: {output_pdf}")
+    print(f"Saved PNG: {png_path}")
 
 
 def main() -> int:
     args = parse_args()
     set_seed(args.seed)
 
-    # 加载模型
+    # load the model
     checkpoint = torch.load(args.checkpoint_path, map_location="cpu")
     cfg = checkpoint.get("config", {})
 
@@ -192,7 +194,7 @@ def main() -> int:
     )
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
 
-    # 加载数据
+    # load the data
     train_dataset = CustomDataset(args.train_feature_path, args.train_label_path, normalize=True)
     test_dataset = CustomDataset(args.test_feature_path, args.test_label_path, normalize=False)
     test_dataset.labels = (test_dataset.labels - train_dataset.label_mean) / train_dataset.label_std
@@ -205,7 +207,7 @@ def main() -> int:
         pin_memory=True,
     )
 
-    # 预测
+    # prediction
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()
@@ -222,18 +224,18 @@ def main() -> int:
     all_preds = np.concatenate(all_preds, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
 
-    # 反归一化
+    # denormalise
     all_preds_original = all_preds * train_dataset.label_std + train_dataset.label_mean
     all_labels_original = all_labels * train_dataset.label_std + train_dataset.label_mean
 
-    # 打印指标
+    # print metrics
     mae = np.mean(np.abs(all_preds_original - all_labels_original), axis=0)
     rmse = np.sqrt(np.mean((all_preds_original - all_labels_original) ** 2, axis=0))
-    print(f"\n样本数: {len(all_labels)}")
+    print(f"\nNumber of samples: {len(all_labels)}")
     print(f"MAE (LOGG, TEFF, C_FE, FE_H): {mae}")
     print(f"RMSE (LOGG, TEFF, C_FE, FE_H): {rmse}")
 
-    # 生成可视化
+    # generate the visualisation
     plot_scatter(all_labels_original, all_preds_original, args.output_pdf)
 
     return 0

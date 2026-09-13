@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-查询 Bailer-Jones 距离估计
+Query Bailer-Jones distance estimates.
 
-从 VizieR TAP 服务查询 Gaia DR3 Bailer-Jones 距离估计，
-包括几何距离和光度几何距离。
+Query Gaia DR3 Bailer-Jones distance estimates from the VizieR TAP service,
+including geometric and photogeometric distances.
 
-输入：vizier_dedup_double.csv（双重去重后的匹配结果）
-输出：bailer_jones_distance_for_candidates.csv
+Input: vizier_dedup_double.csv (the double-deduplicated cross-match result)
+Output: bailer_jones_distance_for_candidates.csv
 """
 
 from __future__ import annotations
@@ -20,14 +20,11 @@ import pandas as pd
 import requests
 
 
-INPUT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/vizier_dedup_double.csv"
-)
-OUTPUT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/bailer_jones_distance_for_candidates.csv"
-)
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")   # <-- EDIT THIS root
+DATA = LGADNET_ROOT
+
+INPUT = DATA / "spatial_filtering_unique" / "vizier_dedup_double.csv"
+OUTPUT = DATA / "spatial_filtering_unique" / "bailer_jones_distance_for_candidates.csv"
 
 TAP_URL = "https://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync"
 BATCH_SIZE = 1000
@@ -36,17 +33,17 @@ SLEEP_SEC = 1.0
 
 def query_batch(source_ids: list[int]) -> pd.DataFrame:
     """
-    查询一批 Source ID 的 Bailer-Jones 距离。
+    Query Bailer-Jones distances for a batch of Source IDs.
 
     Parameters
     ----------
     source_ids : list[int]
-        Gaia DR3 Source ID 列表
+        List of Gaia DR3 Source IDs
 
     Returns
     -------
     pd.DataFrame
-        查询结果，包含距离估计和置信区间
+        Query result containing distance estimates and confidence intervals
     """
     source_list = ",".join(str(int(x)) for x in source_ids)
 
@@ -85,10 +82,10 @@ def query_batch(source_ids: list[int]) -> pd.DataFrame:
 
 def main() -> int:
     print("=" * 80)
-    print("查询 Bailer-Jones 距离估计")
+    print("Query Bailer-Jones distance estimates")
     print("=" * 80)
 
-    # 读取输入文件
+    # Read the input file
     df = pd.read_csv(INPUT, usecols=["Source"])
     sources = (
         pd.to_numeric(df["Source"], errors="coerce")
@@ -98,17 +95,17 @@ def main() -> int:
         .tolist()
     )
 
-    print(f"\n输入文件: {INPUT}")
-    print(f"唯一 Source 数量: {len(sources):,}")
+    print(f"\nInput file: {INPUT}")
+    print(f"Number of unique Sources: {len(sources):,}")
 
-    # 分批查询
+    # Query in batches
     all_parts = []
     total = len(sources)
     total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
 
-    print(f"\n批次大小: {BATCH_SIZE}")
-    print(f"总批次数: {total_batches}")
-    print(f"预计时间: ~{total_batches * SLEEP_SEC / 60:.1f} 分钟（不含网络时间）")
+    print(f"\nBatch size: {BATCH_SIZE}")
+    print(f"Total batches: {total_batches}")
+    print(f"Estimated time: ~{total_batches * SLEEP_SEC / 60:.1f} minutes (excluding network time)")
     print("-" * 80)
 
     for start in range(0, total, BATCH_SIZE):
@@ -116,21 +113,21 @@ def main() -> int:
         batch = sources[start:end]
         batch_num = start // BATCH_SIZE + 1
 
-        print(f"批次 {batch_num}/{total_batches}: 查询 {start:,} - {end:,} / {total:,}")
+        print(f"Batch {batch_num}/{total_batches}: querying {start:,} - {end:,} / {total:,}")
 
         try:
             part = query_batch(batch)
             if len(part) > 0:
                 all_parts.append(part)
-            print(f"  ✓ 匹配数: {len(part):,}")
+            print(f"  Matched: {len(part):,}")
         except Exception as exc:
-            print(f"  ✗ 错误: {exc}")
+            print(f"  Error: {exc}")
 
         time.sleep(SLEEP_SEC)
 
-    # 合并结果
+    # Merge results
     print("\n" + "-" * 80)
-    print("合并结果")
+    print("Merging results")
 
     if all_parts:
         out = pd.concat(all_parts, ignore_index=True)
@@ -149,16 +146,16 @@ def main() -> int:
             ]
         )
 
-    # 保存输出
+    # Save output
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(OUTPUT, index=False)
 
     print("=" * 80)
-    print("查询完成")
+    print("Query complete")
     print("=" * 80)
-    print(f"输出文件: {OUTPUT}")
-    print(f"匹配行数: {len(out):,}")
-    print(f"匹配率: {len(out) / len(sources) * 100:.2f}%")
+    print(f"Output file: {OUTPUT}")
+    print(f"Matched rows: {len(out):,}")
+    print(f"Match rate: {len(out) / len(sources) * 100:.2f}%")
     print("=" * 80)
 
     return 0

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LAMOST DR12 分片光谱 LGADNet 预测 + CEMP 分类流水线。
+LGADNet prediction and CEMP classification pipeline over sharded LAMOST DR12 spectra.
 
-设计目标：
-1. 按 split_all/all01、all02 ... 分片逐个处理，便于断点续跑。
-2. 每个分片内部流式读取 CSV 和小批量预测，避免一次性加载千万级光谱。
-3. 预测后立即计算 CEMP 分类，分别输出全量预测、CEMP 候选、失败记录和摘要。
-4. 可选合并分片结果，可选生成 CEMP 诊断图。
+Design goals:
+1. Process spectra shard by shard (all01, all02, ...) so long runs can resume.
+2. Stream CSV and predict in small batches within each shard to bound memory.
+3. Classify CEMP right after prediction; emit full predictions, CEMP candidates,
+   failure records, and a summary.
+4. Optionally merge shard results and produce CEMP diagnostic figures.
 """
 
 from __future__ import annotations
@@ -38,18 +39,15 @@ from tqdm import tqdm
 
 
 # =============================================================================
-# 默认路径与常量
+# default paths and constants
 # =============================================================================
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LGADNET_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CSV_PATH = Path("/home/DM13/workspace/sky/data/lamost_dr12_cleaned.csv")
-DEFAULT_SPLIT_DIR = LGADNET_ROOT / "dr12_fits" / "split_all"
-DEFAULT_OUTPUT_DIR = LGADNET_ROOT / "cemp_pipeline_lgadnet_v6_cemp3020_bs3072_labelscale_fixed"
-DEFAULT_MODEL_WEIGHT_PATH = Path(
-    "/home/DM13/workspace/sky/out_files/lgadnet_regression_selected_v6_cemp3020_20260611/"
-    "lgadnet_regression_selected_v6_cemp3020_20260611_29_best_model.pth"
-)
+DEFAULT_CSV_PATH = Path("/path/to/your/dr12_catalog.csv")   # <-- EDIT or pass --csv-path
+DEFAULT_SPLIT_DIR = LGADNET_ROOT / "spectra"
+DEFAULT_OUTPUT_DIR = LGADNET_ROOT / "predictions"
+DEFAULT_MODEL_WEIGHT_PATH = Path("/path/to/your/model_checkpoint.pth")   # <-- EDIT or pass --model-weight
 
 WAVELENGTH_SCOPE = [3900, 8800]
 TARGET_WAVELENGTHS = np.arange(WAVELENGTH_SCOPE[0], WAVELENGTH_SCOPE[1] + 1, 1)
@@ -115,11 +113,11 @@ FAILED_COLUMNS = META_COLUMNS + ["reason"]
 
 
 # =============================================================================
-# 模型定义：与训练脚本结构保持一致
+# model definition: mirrors the training script structure
 # =============================================================================
 
 class IDConv1dFull(nn.Module):
-    """非深度卷积的动态卷积。"""
+    """Dynamic convolution (no grouped/depthwise restriction)."""
 
     def __init__(
         self,
@@ -133,8 +131,8 @@ class IDConv1dFull(nn.Module):
         bias: bool = True,
     ):
         super().__init__()
-        assert num_kernels > 1, "num_kernels 应 > 1"
-        assert kernel_size >= 1, "kernel_size 应 >= 1"
+        assert num_kernels > 1, "num_kernels must be > 1"
+        assert kernel_size >= 1, "kernel_size must be >= 1"
         if padding is None:
             padding = kernel_size // 2
 
@@ -171,7 +169,7 @@ class IDConv1dFull(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, cin, length = x.shape
-        assert cin == self.Cin, f"Cin 对不上: 期望 {self.Cin}, 实际 {cin}"
+        assert cin == self.Cin, f"Cin mismatch: expected {self.Cin}, got {cin}"
 
         g_logits = self.gate(self.pool(x)).squeeze(-1)
         alpha = torch.softmax(g_logits, dim=1)
@@ -196,7 +194,7 @@ class IDConv1dFull(nn.Module):
 
 
 class ResNet1D_Block_ResDynFull(nn.Module):
-    """一维残差块。"""
+    """1D residual block."""
 
     def __init__(
         self,
@@ -255,7 +253,7 @@ class ResNet1D_Block_ResDynFull(nn.Module):
 
 
 class LGADNet(nn.Module):
-    """LGADNet 回归模型。"""
+    """LGADNet regression model."""
 
     def __init__(
         self,
@@ -353,7 +351,7 @@ class LGADNet(nn.Module):
 
 
 # =============================================================================
-# 数据结构与通用工具
+# data structures and general utilities
 # =============================================================================
 
 @dataclass
@@ -377,7 +375,7 @@ def now() -> str:
 def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
-        raise argparse.ArgumentTypeError("必须是正整数")
+        raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
 
 
@@ -385,10 +383,10 @@ def parse_float_list(value: str) -> np.ndarray:
     try:
         parsed = np.array([float(item.strip()) for item in value.split(",")], dtype=np.float32)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"无法解析浮点数列表: {value}") from exc
+        raise argparse.ArgumentTypeError(f"failed to parse float list: {value}") from exc
 
     if parsed.shape[0] != NUM_LABEL:
-        raise argparse.ArgumentTypeError(f"需要 {NUM_LABEL} 个数值，实际得到 {parsed.shape[0]} 个")
+        raise argparse.ArgumentTypeError(f"expected {NUM_LABEL} values, got {parsed.shape[0]}")
     return parsed
 
 
@@ -424,8 +422,8 @@ def append_dataframe(path: Path, df: pd.DataFrame, columns: Sequence[str]) -> No
             existing_columns = next(csv.reader(handle), [])
         if existing_columns != expected_columns:
             raise RuntimeError(
-                f"已有输出文件列结构与当前脚本不一致: {path}\n"
-                "请使用 --overwrite 重跑，或指定新的 --output-dir，避免新旧结果混写。"
+                f"existing output file columns are inconsistent with this script: {path}\n"
+                "use --overwrite to rerun, or set a new --output-dir to avoid mixing results."
             )
 
     df.reindex(columns=expected_columns).to_csv(path, mode="a", header=write_header, index=False)
@@ -440,8 +438,8 @@ def remove_output_if_needed(paths: Iterable[Path], overwrite: bool, resume: bool
     if not overwrite:
         joined = "\n".join(str(p) for p in existing)
         raise RuntimeError(
-            "输出文件已存在，为避免重复追加已停止。"
-            "如需断点续跑加 --resume；如需重跑覆盖加 --overwrite。\n"
+            "output files already exist; stopped to avoid appending duplicates."
+            "use --resume to continue, or --overwrite to rerun.\n"
             f"{joined}"
         )
     for path in existing:
@@ -453,25 +451,25 @@ def read_csv_header(csv_path: Path) -> list[str]:
         reader = csv.reader(handle)
         header = next(reader, None)
     if not header:
-        raise RuntimeError(f"CSV 文件为空或无法读取表头: {csv_path}")
+        raise RuntimeError(f"CSV file is empty or its header cannot be read: {csv_path}")
     return header
 
 
 # =============================================================================
-# 光谱文件发现
+# spectra file discovery
 # =============================================================================
 
 def discover_shards(split_dir: Path) -> list[str]:
     if not split_dir.is_dir():
-        raise RuntimeError(f"分片目录不存在: {split_dir}")
+        raise RuntimeError(f"shard directory does not exist: {split_dir}")
     shards = [p.name for p in split_dir.iterdir() if p.is_dir() and p.name.startswith("all")]
     return sorted(shards)
 
 
 def build_shard_file_map(shard_dir: Path) -> dict[str, str]:
-    """构建当前分片内 filename -> full path 映射。"""
+    """Build a filename -> full-path map for the current shard."""
     if not shard_dir.is_dir():
-        raise RuntimeError(f"分片目录不存在: {shard_dir}")
+        raise RuntimeError(f"shard directory does not exist: {shard_dir}")
 
     files: dict[str, str] = {}
     with os.scandir(shard_dir) as entries:
@@ -481,7 +479,7 @@ def build_shard_file_map(shard_dir: Path) -> dict[str, str]:
             if not entry.name.endswith(".fits.gz"):
                 continue
             if entry.name in files:
-                raise RuntimeError(f"分片内出现重复文件名: {entry.name}")
+                raise RuntimeError(f"duplicate filename within the shard: {entry.name}")
             files[entry.name] = entry.path
     return files
 
@@ -497,7 +495,7 @@ def load_done_filenames(predict_path: Path, shard_files: set[str]) -> set[str]:
 
 
 # =============================================================================
-# 光谱预处理与 CEMP 分类
+# spectrum preprocessing and CEMP classification
 # =============================================================================
 
 def normalize_header_value(value):
@@ -523,7 +521,7 @@ def metadata_from_header(header, spectrum_path: str | Path) -> dict:
 
 
 def process_spectrum_file(spectrum_path: str | Path) -> tuple[np.ndarray | None, dict, str | None]:
-    """读取 FITS header 中的 z 和元数据，并预处理单个光谱。"""
+    """Read z and metadata from the FITS header and preprocess a single spectrum."""
     meta = {
         "filename": Path(spectrum_path).name,
         "source_path": str(spectrum_path),
@@ -630,7 +628,7 @@ def process_spectrum_file(spectrum_path: str | Path) -> tuple[np.ndarray | None,
 
 
 def classify_predictions(df: pd.DataFrame) -> pd.DataFrame:
-    """根据预测参数计算 logL 并分类 CEMP。"""
+    """Compute logL from the predicted parameters and classify CEMP."""
     df = df.copy()
 
     teff = pd.to_numeric(df["TEFF"], errors="coerce")
@@ -671,7 +669,7 @@ def classify_predictions(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
-# 模型加载与预测写出
+# model loading and prediction write-out
 # =============================================================================
 
 def resolve_device(device_arg: str) -> torch.device:
@@ -688,7 +686,7 @@ def normalize_state_dict(raw_state):
                 break
 
     if not isinstance(raw_state, dict):
-        raise RuntimeError("模型权重不是 state_dict 格式")
+        raise RuntimeError("model weights are not in state_dict format")
 
     if any(str(key).startswith("module.") for key in raw_state.keys()):
         raw_state = {str(key).removeprefix("module."): value for key, value in raw_state.items()}
@@ -701,16 +699,16 @@ def load_checkpoint(model_weight_path: Path, map_location="cpu"):
 
 def load_checkpoint_label_stats(checkpoint, model_weight_path: Path) -> tuple[np.ndarray, np.ndarray]:
     if not isinstance(checkpoint, dict):
-        raise RuntimeError(f"checkpoint 不是 dict 格式: {model_weight_path}")
+        raise RuntimeError(f"checkpoint is not a dict: {model_weight_path}")
     if "label_mean" not in checkpoint or "label_std" not in checkpoint:
-        raise RuntimeError(f"checkpoint 缺少 label_mean/label_std: {model_weight_path}")
+        raise RuntimeError(f"checkpoint is missing label_mean/label_std: {model_weight_path}")
 
     label_mean = np.asarray(checkpoint["label_mean"], dtype=np.float32)
     label_std = np.asarray(checkpoint["label_std"], dtype=np.float32)
     if label_mean.shape != (NUM_LABEL,) or label_std.shape != (NUM_LABEL,):
-        raise RuntimeError(f"checkpoint 标签统计量维度错误: mean={label_mean.shape}, std={label_std.shape}")
+        raise RuntimeError(f"checkpoint label statistics have wrong shape: mean={label_mean.shape}, std={label_std.shape}")
     if not np.all(np.isfinite(label_mean)) or not np.all(np.isfinite(label_std)) or np.any(label_std == 0):
-        raise RuntimeError("checkpoint 标签统计量包含非法值")
+        raise RuntimeError("checkpoint label statistics contain invalid values")
     return label_mean, label_std
 
 
@@ -754,7 +752,7 @@ def flush_predictions(
     label_mean = np.asarray(label_mean, dtype=np.float32)
     label_std = np.asarray(label_std, dtype=np.float32)
     if predictions.ndim != 2 or predictions.shape[1] != NUM_LABEL:
-        raise RuntimeError(f"模型输出维度错误: {predictions.shape}")
+        raise RuntimeError(f"model output has wrong shape: {predictions.shape}")
     predictions = predictions * label_std.reshape(1, -1) + label_mean.reshape(1, -1)
     result_df = pd.DataFrame(meta_buffer)
     for index, label in enumerate(LABEL_NAMES):
@@ -780,7 +778,7 @@ def flush_failed(failed_path: Path, failed_buffer: list[dict]) -> int:
 
 
 # =============================================================================
-# 分片处理
+# shard processing
 # =============================================================================
 
 def process_one_shard(
@@ -799,24 +797,24 @@ def process_one_shard(
     remove_output_if_needed([predict_path, cemp_path, failed_path, summary_path], args.overwrite, args.resume)
 
     stats = ShardStats(shard=shard, started_at=now())
-    log(f"开始处理分片 {shard}: {shard_dir}", log_path)
+    log(f"Starting shard {shard}: {shard_dir}", log_path)
 
     file_paths = build_shard_file_map(shard_dir)
     shard_file_names = set(file_paths.keys())
     stats.shard_files = len(file_paths)
-    log(f"{shard}: 分片 FITS 文件数 {stats.shard_files:,}", log_path)
+    log(f"{shard}: FITS files in shard {stats.shard_files:,}", log_path)
 
     done_filenames = load_done_filenames(predict_path, shard_file_names) if args.resume else set()
     stats.skipped_done = len(done_filenames)
     if done_filenames:
-        log(f"{shard}: resume 跳过已完成 {len(done_filenames):,} 个文件", log_path)
+        log(f"{shard}: resume skipping {len(done_filenames):,} already-done files", log_path)
 
     flux_buffer: list[np.ndarray] = []
     meta_buffer: list[dict] = []
     failed_buffer: list[dict] = []
 
     total_for_progress = args.limit or max(0, stats.shard_files - len(done_filenames))
-    pbar = tqdm(desc=f"{shard} 处理", unit="file", total=total_for_progress)
+    pbar = tqdm(desc=f"processing {shard}", unit="file", total=total_for_progress)
 
     try:
         for filename, source_path in sorted(file_paths.items()):
@@ -892,7 +890,7 @@ def process_one_shard(
     stats.ended_at = now()
     write_shard_summary(summary_path, stats, predict_path, cemp_path, failed_path)
     log(
-        f"完成分片 {shard}: attempted={stats.attempted:,}, predicted={stats.predicted:,}, "
+        f"finished shard {shard}: attempted={stats.attempted:,}, predicted={stats.predicted:,}, "
         f"cemp={stats.cemp:,}, failed={stats.failed:,}",
         log_path,
     )
@@ -926,7 +924,7 @@ def write_shard_summary(
 
 
 # =============================================================================
-# 合并结果
+# merge results
 # =============================================================================
 
 def merge_csv_files(
@@ -938,10 +936,10 @@ def merge_csv_files(
 ) -> int:
     existing_inputs = [p for p in input_paths if p.exists() and p.stat().st_size > 0]
     if not existing_inputs and not allow_empty:
-        raise RuntimeError(f"没有找到可合并的输入文件: {output_path.name}")
+        raise RuntimeError(f"no input files found to merge: {output_path.name}")
     if output_path.exists():
         if not overwrite:
-            raise RuntimeError(f"合并输出已存在，避免覆盖: {output_path}")
+            raise RuntimeError(f"merged output already exists, refusing to overwrite: {output_path}")
         output_path.unlink()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1003,8 +1001,8 @@ def merge_outputs(args: argparse.Namespace, shards: Sequence[str] | None, log_pa
         allow_empty=True,
     )
 
-    log(f"合并预测结果完成: {predict_output} rows={predict_rows:,}", log_path)
-    log(f"合并 CEMP 结果完成: {cemp_output} rows={cemp_rows:,}", log_path)
+    log(f"merged predictions done: {predict_output} rows={predict_rows:,}", log_path)
+    log(f"merged CEMP results done: {cemp_output} rows={cemp_rows:,}", log_path)
 
 
 # =============================================================================
@@ -1013,35 +1011,35 @@ def merge_outputs(args: argparse.Namespace, shards: Sequence[str] | None, log_pa
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="按分片处理 LAMOST DR12 光谱，执行 LGADNet 预测和 CEMP 分类。"
+        description="Shard-by-shard LGADNet prediction and CEMP classification of LAMOST DR12 spectra."
     )
-    parser.add_argument("--csv-path", type=Path, default=DEFAULT_CSV_PATH, help="兼容旧参数；当前默认直接从 FITS header 读取 z 和元数据，不依赖该 CSV")
+    parser.add_argument("--csv-path", type=Path, default=DEFAULT_CSV_PATH, help="DEPRECATED; z and metadata are now read from the FITS header")
     parser.add_argument("--split-dir", type=Path, default=DEFAULT_SPLIT_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--model-weight", type=Path, default=DEFAULT_MODEL_WEIGHT_PATH)
-    parser.add_argument("--shard", nargs="+", dest="shards", help="指定一个或多个分片，如 all01 all02")
-    parser.add_argument("--all-shards", action="store_true", help="处理 split-dir 下所有 all* 分片")
-    parser.add_argument("--csv-chunksize", type=positive_int, default=50_000, help="兼容旧参数；FITS header 模式不使用")
+    parser.add_argument("--shard", nargs="+", dest="shards", help="one or more shards, e.g. all01 all02")
+    parser.add_argument("--all-shards", action="store_true", help="process every all* shard under --split-dir")
+    parser.add_argument("--csv-chunksize", type=positive_int, default=50_000, help="DEPRECATED; ignored in FITS-header mode")
     parser.add_argument("--predict-batch-size", type=positive_int, default=32)
     parser.add_argument("--failed-flush-size", type=positive_int, default=1_000)
     parser.add_argument("--progress-interval", type=positive_int, default=10_000)
-    parser.add_argument("--limit", type=positive_int, help="每个分片最多尝试处理的光谱数，用于小样本测试")
-    parser.add_argument("--device", default="auto", help="auto/cuda/cpu 或具体 torch device")
+    parser.add_argument("--limit", type=positive_int, help="max spectra to attempt per shard (for small-sample testing)")
+    parser.add_argument("--device", default="auto", help="auto/cuda/cpu or a specific torch device")
     parser.add_argument(
         "--label-mean",
         type=parse_float_list,
-        help="可选覆盖 checkpoint 中的 4 维标签均值，按 LOGG,TEFF,C_FE,FE_H 顺序，逗号分隔",
+        help="optional override of the 4 label means (LOGG,TEFF,C_FE,FE_H), comma-separated",
     )
     parser.add_argument(
         "--label-std",
         type=parse_float_list,
-        help="可选覆盖 checkpoint 中的 4 维标签标准差，按 LOGG,TEFF,C_FE,FE_H 顺序，逗号分隔",
+        help="optional override of the 4 label stds (LOGG,TEFF,C_FE,FE_H), comma-separated",
     )
-    parser.add_argument("--resume", action="store_true", help="断点续跑，跳过已写入 predict CSV 的 filename")
-    parser.add_argument("--overwrite", action="store_true", help="覆盖已有输出文件")
-    parser.add_argument("--record-unmatched-files", action="store_true", help="兼容旧参数；FITS header 模式不产生 unmatched 文件")
-    parser.add_argument("--merge", action="store_true", help="处理完成后合并分片 predict/cemp CSV")
-    parser.add_argument("--merge-only", action="store_true", help="只合并已有分片结果")
+    parser.add_argument("--resume", action="store_true", help="resume by skipping filenames already written to the predict CSV")
+    parser.add_argument("--overwrite", action="store_true", help="overwrite existing output files")
+    parser.add_argument("--record-unmatched-files", action="store_true", help="DEPRECATED; FITS-header mode produces no unmatched file")
+    parser.add_argument("--merge", action="store_true", help="merge shard predict/cemp CSVs when done")
+    parser.add_argument("--merge-only", action="store_true", help="only merge existing shard results")
     return parser.parse_args()
 
 
@@ -1049,20 +1047,20 @@ def resolve_selected_shards(args: argparse.Namespace) -> list[str] | None:
     if args.all_shards:
         shards = discover_shards(args.split_dir)
         if not shards:
-            raise RuntimeError(f"没有在分片目录中找到 all* 子目录: {args.split_dir}")
+            raise RuntimeError(f"no all* subdirectories found in the shard directory: {args.split_dir}")
         return shards
     if args.shards:
         return args.shards
     if args.merge_only:
         return None
-    raise RuntimeError("请指定 --shard all01 或 --all-shards")
+    raise RuntimeError("specify --shard all01 or --all-shards")
 
 
 def validate_inputs(args: argparse.Namespace) -> None:
     if not args.split_dir.is_dir():
-        raise RuntimeError(f"分片目录不存在: {args.split_dir}")
+        raise RuntimeError(f"shard directory does not exist: {args.split_dir}")
     if not args.model_weight.is_file() and not args.merge_only:
-        raise RuntimeError(f"模型权重不存在: {args.model_weight}")
+        raise RuntimeError(f"model weights do not exist: {args.model_weight}")
 
 
 def main() -> int:
@@ -1082,7 +1080,7 @@ def main() -> int:
     checkpoint = None
     if needs_prediction:
         if (args.label_mean is None) != (args.label_std is None):
-            raise RuntimeError("--label-mean 和 --label-std 必须同时提供")
+            raise RuntimeError("--label-mean and --label-std must be provided together")
         checkpoint = load_checkpoint(args.model_weight)
         if args.label_mean is None:
             args.label_mean, args.label_std = load_checkpoint_label_stats(checkpoint, args.model_weight)
@@ -1092,7 +1090,7 @@ def main() -> int:
     log("metadata_source=FITS header", log_path)
     log(f"split_dir={args.split_dir}", log_path)
     log(f"output_dir={args.output_dir}", log_path)
-    log(f"shards={shards if shards else '已有结果'}", log_path)
+    log(f"shards={shards if shards else 'existing results'}", log_path)
     if args.label_mean is not None:
         log(f"label_mean={args.label_mean.tolist()}", log_path)
         log(f"label_std={args.label_std.tolist()}", log_path)

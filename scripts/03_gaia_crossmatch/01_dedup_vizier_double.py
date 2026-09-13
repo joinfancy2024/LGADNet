@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双重去重脚本：对VizieR交叉匹配结果进行两级去重
+Double-deduplication script: two-level deduplication of the VizieR cross-match results.
 
-去重策略：
-1. 第一级：按 candidate_id 去重（每个LAMOST候选只保留最近的Gaia匹配）
-2. 第二级：按 Source 去重（每个Gaia源只保留最近的一个候选）
+Deduplication strategy:
+1. Level 1: deduplicate by candidate_id (keep only the nearest Gaia match for each LAMOST candidate)
+2. Level 2: deduplicate by Source (keep only the nearest candidate for each Gaia source)
 
-输入：VizieR返回的匹配结果CSV
-输出：双重去重后的CSV文件
+Input: VizieR returned cross-match result CSV
+Output: CSV file after double deduplication
 """
 
 from __future__ import annotations
@@ -19,14 +19,14 @@ from pathlib import Path
 import pandas as pd
 
 
-DEFAULT_INPUT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/1781361837819A.csv"
-)
-DEFAULT_OUTPUT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/vizier_dedup_double.csv"
-)
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")   # <-- EDIT THIS root
+DATA = LGADNET_ROOT
+
+# Input is the cross-match result CSV returned by VizieR after uploading
+# vizier_upload_with_id.csv. Save your downloaded result under this name, or
+# override with --input.
+DEFAULT_INPUT = DATA / "spatial_filtering_unique" / "vizier_crossmatch_result.csv"
+DEFAULT_OUTPUT = DATA / "spatial_filtering_unique" / "vizier_dedup_double.csv"
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,101 +42,101 @@ def main() -> int:
     input_path = args.input.resolve()
     output_path = args.output.resolve()
 
-    # 检查输入文件
+    # Check the input file
     if not input_path.is_file():
-        raise FileNotFoundError(f"输入 CSV 不存在: {input_path}")
+        raise FileNotFoundError(f"Input CSV does not exist: {input_path}")
     if output_path.exists() and not args.overwrite:
-        raise FileExistsError(f"输出文件已存在，请换路径或加 --overwrite: {output_path}")
+        raise FileExistsError(f"Output file already exists; use a different path or add --overwrite: {output_path}")
 
-    # 加载数据
+    # Load data
     print("=" * 80)
-    print("VizieR 匹配结果双重去重")
+    print("VizieR cross-match double deduplication")
     print("=" * 80)
-    print(f"\n输入文件: {input_path}")
+    print(f"\nInput file: {input_path}")
 
     df = pd.read_csv(input_path)
-    print(f"原始记录数: {len(df):,}")
+    print(f"Number of raw records: {len(df):,}")
 
-    # 检查必要列
+    # Check required columns
     required_cols = ['candidate_id', 'angDist', 'Source']
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
-        raise ValueError(f"输入 CSV 缺少必要列: {missing_cols}")
+        raise ValueError(f"Input CSV is missing required columns: {missing_cols}")
 
-    # 转换 angDist 为数值类型
+    # Convert angDist to numeric type
     df['angDist'] = pd.to_numeric(df['angDist'], errors='coerce')
     df = df.dropna(subset=['angDist'])
 
     # ============================================================
-    # 第一级去重：按 candidate_id（每个LAMOST候选只保留最近的Gaia匹配）
+    # Level 1 deduplication: by candidate_id (keep the nearest Gaia match for each LAMOST candidate)
     # ============================================================
     print("\n" + "-" * 80)
-    print("第一级去重：按 candidate_id（保留 angDist 最小）")
+    print("Level 1 deduplication: by candidate_id (keep the smallest angDist)")
     print("-" * 80)
 
     df_step1 = df.sort_values(['candidate_id', 'angDist']).drop_duplicates(
         'candidate_id', keep='first'
     )
     removed_step1 = len(df) - len(df_step1)
-    print(f"  原始记录数: {len(df):,}")
-    print(f"  去重后记录数: {len(df_step1):,}")
-    print(f"  移除记录数: {removed_step1:,}")
-    print(f"  唯一 candidate_id: {df_step1['candidate_id'].nunique():,}")
+    print(f"  Raw records: {len(df):,}")
+    print(f"  Records after deduplication: {len(df_step1):,}")
+    print(f"  Removed records: {removed_step1:,}")
+    print(f"  Unique candidate_id: {df_step1['candidate_id'].nunique():,}")
 
     # ============================================================
-    # 第二级去重：按 Source（每个Gaia源只保留最近的一个候选）
+    # Level 2 deduplication: by Source (keep only the nearest candidate for each Gaia source)
     # ============================================================
     print("\n" + "-" * 80)
-    print("第二级去重：按 Source（保留 angDist 最小）")
+    print("Level 2 deduplication: by Source (keep the smallest angDist)")
     print("-" * 80)
 
-    # 检查 Source 重复情况
+    # Check Source duplicate counts
     source_counts = df_step1['Source'].value_counts()
     multi_source = source_counts[source_counts > 1]
-    print(f"  有重复的 Source 数量: {len(multi_source):,}")
-    print(f"  涉及记录数: {multi_source.sum():,}")
+    print(f"  Count of duplicate Sources: {len(multi_source):,}")
+    print(f"  Records involved: {multi_source.sum():,}")
 
-    # 执行第二级去重
+    # Perform level 2 deduplication
     df_step2 = df_step1.sort_values(['Source', 'angDist']).drop_duplicates(
         'Source', keep='first'
     )
     removed_step2 = len(df_step1) - len(df_step2)
-    print(f"  第一级去重后: {len(df_step1):,}")
-    print(f"  第二级去重后: {len(df_step2):,}")
-    print(f"  移除记录数: {removed_step2:,}")
-    print(f"  唯一 Source: {df_step2['Source'].nunique():,}")
+    print(f"  After level 1 deduplication: {len(df_step1):,}")
+    print(f"  After level 2 deduplication: {len(df_step2):,}")
+    print(f"  Removed records: {removed_step2:,}")
+    print(f"  Unique Source: {df_step2['Source'].nunique():,}")
 
     # ============================================================
-    # 统计总结
+    # Summary statistics
     # ============================================================
     print("\n" + "=" * 80)
-    print("去重统计总结")
+    print("Deduplication summary")
     print("=" * 80)
-    print(f"  原始记录数: {len(df):,}")
-    print(f"  第一级去重移除: {removed_step1:,} (candidate_id 重复)")
-    print(f"  第二级去重移除: {removed_step2:,} (Source 重复)")
-    print(f"  最终记录数: {len(df_step2):,}")
-    print(f"  总移除记录数: {len(df) - len(df_step2):,}")
-    print(f"  保留比例: {len(df_step2)/len(df)*100:.2f}%")
+    print(f"  Raw records: {len(df):,}")
+    print(f"  Removed by level 1: {removed_step1:,} (duplicate candidate_id)")
+    print(f"  Removed by level 2: {removed_step2:,} (duplicate Source)")
+    print(f"  Final records: {len(df_step2):,}")
+    print(f"  Total removed records: {len(df) - len(df_step2):,}")
+    print(f"  Retention ratio: {len(df_step2)/len(df)*100:.2f}%")
 
-    # 验证唯一性
+    # Verify uniqueness
     print("\n" + "-" * 80)
-    print("唯一性验证")
+    print("Uniqueness verification")
     print("-" * 80)
-    print(f"  ✓ candidate_id 唯一: {df_step2['candidate_id'].nunique() == len(df_step2)}")
-    print(f"  ✓ Source 唯一: {df_step2['Source'].nunique() == len(df_step2)}")
+    print(f"  candidate_id unique: {df_step2['candidate_id'].nunique() == len(df_step2)}")
+    print(f"  Source unique: {df_step2['Source'].nunique() == len(df_step2)}")
 
     # ============================================================
-    # 保存结果
+    # Save results
     # ============================================================
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df_step2.to_csv(output_path, index=False)
 
     print("\n" + "=" * 80)
-    print("输出结果")
+    print("Output")
     print("=" * 80)
-    print(f"  输出文件: {output_path}")
-    print(f"  记录数: {len(df_step2):,}")
+    print(f"  Output file: {output_path}")
+    print(f"  Records: {len(df_step2):,}")
 
     return 0
 

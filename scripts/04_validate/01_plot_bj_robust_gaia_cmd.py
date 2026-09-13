@@ -8,7 +8,6 @@ Input:
 
 Outputs:
     cemp_bj_robust_cmd_flags.csv
-    cemp_bj_robust_cmd_summary.txt
     cemp_bj_robust_gaia_cmd.pdf
 """
 
@@ -21,23 +20,13 @@ import numpy as np
 import pandas as pd
 
 
-INPUT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_candidates_6928.csv"
-)
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")   # <-- EDIT THIS root
+DATA = LGADNET_ROOT
 
-OUTPUT_CSV = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_cmd_flags.csv"
-)
-OUTPUT_REPORT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_cmd_summary.txt"
-)
-OUTPUT_FIG = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_gaia_cmd.pdf"
-)
+INPUT = DATA / "spatial_filtering_unique" / "cemp_bj_robust_candidates_6928.csv"
+
+OUTPUT_CSV = DATA / "spatial_filtering_unique" / "cemp_bj_robust_cmd_flags.csv"
+OUTPUT_FIG = DATA / "spatial_filtering_unique" / "cemp_bj_robust_gaia_cmd.pdf"
 
 COLOR_CUT = 0.4
 MG_CUT = 7.0
@@ -159,7 +148,7 @@ def main() -> int:
 
     report = "\n".join(lines)
 
-    # Set global plot style (consistent with plot_cemp_density.py)
+    # Set global plot style (consistent with plot_cemp_parameter_density.py)
     plt.rcParams.update({
         "font.family": "serif",
         "font.size": 11,
@@ -238,12 +227,10 @@ def main() -> int:
 
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUTPUT_CSV, index=False)
-    OUTPUT_REPORT.write_text(report, encoding="utf-8")
 
     print(report)
     print("=" * 80)
     print(f"Output CSV: {OUTPUT_CSV}")
-    print(f"Output report: {OUTPUT_REPORT}")
     print(f"Output figure: {OUTPUT_FIG}")
 
     return 0

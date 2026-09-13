@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""用指定 LGADNet checkpoint 在给定数据集上做三分类评估。"""
+"""Three-class evaluation on a given dataset using a specified LGADNet checkpoint."""
 
 from __future__ import annotations
 
@@ -24,14 +24,15 @@ from sklearn.metrics import (
 )
 from torch.utils.data import DataLoader, Dataset
 
-ROOT_DIR = Path("/home/DM13/workspace/sky")
-LGADNET_DIR = ROOT_DIR / "data/new_dataset3/lgadnet"
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(LGADNET_DIR) not in sys.path:
-    sys.path.insert(0, str(LGADNET_DIR))
+# The LGADNet model class lives in the prediction script. Expose
+# scripts/02_predict on sys.path and load it (numeric filename -> importlib).
+import importlib
 
-from pipelines.train.train_lgadnet import LGADNet
+_PREDICT_DIR = Path(__file__).resolve().parents[1] / "02_predict"
+if str(_PREDICT_DIR) not in sys.path:
+    sys.path.insert(0, str(_PREDICT_DIR))
+_predict = importlib.import_module("01_predict_lgadnet_dr12")  # name starts with a digit
+LGADNet = _predict.LGADNet
 
 
 CLASS_ORDER = ["other", "mp_no_cemp", "cemp"]
@@ -64,12 +65,12 @@ class CustomDataset(Dataset):
         label_df = pd.read_csv(label_path)
         self.labels = label_df[["LOGG", "TEFF", "C_FE", "FE_H"]].values.astype(np.float32)
 
-        # 过滤 NaN 样本
+        # drop samples containing NaN
         valid_mask = np.all(np.isfinite(self.features), axis=1) & np.all(np.isfinite(self.labels), axis=1)
         self.features = self.features[valid_mask]
         self.labels = self.labels[valid_mask]
         self.valid_indices = np.where(valid_mask)[0]
-        print(f"[INFO] 过滤 NaN 样本: 原始 {len(valid_mask)} -> 保留 {len(self.valid_indices)} (丢弃 {len(valid_mask) - len(self.valid_indices)})")
+        print(f"[INFO] Dropped NaN samples: {len(valid_mask)} -> kept {len(self.valid_indices)} (removed {len(valid_mask) - len(self.valid_indices)})")
 
         if normalize:
             self.label_mean = np.mean(self.labels, axis=0)

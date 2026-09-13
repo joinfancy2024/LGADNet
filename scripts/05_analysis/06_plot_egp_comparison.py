@@ -19,15 +19,13 @@ import pandas as pd
 from scipy.stats import gaussian_kde
 
 
-ROOT_DIR = Path("/home/DM13/workspace/sky")
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")   # <-- EDIT THIS root
 DEFAULT_TRAIN_CSV = (
-    ROOT_DIR
-    / "data/new_dataset3/lgadnet/regression_snr5_selected_v6_cemp3020_20260611/new_dataset_train_y_with_egp.csv"
+    LGADNET_ROOT
+    / "lgadnet_dataset/train_labels_with_egp.csv"
 )
-DEFAULT_FINAL_CSV = (
-    ROOT_DIR / "data/new_dataset3/lgadnet/pipeline2/results/data/final/cemp_bj_robust_cmdretained_final_catalog.csv"
-)
-DEFAULT_OUTPUT_DIR = ROOT_DIR / "data/new_dataset3/lgadnet/spatial_filtering_unique"
+DEFAULT_FINAL_CSV = LGADNET_ROOT / "final_validated" / "cemp_final_cmdretained.csv"
+DEFAULT_OUTPUT_DIR = LGADNET_ROOT / "spatial_filtering_unique"
 DEFAULT_PREFIX = "egp_train_vs_cemp_bj_cmdretained_final"
 
 
@@ -157,7 +155,7 @@ def plot_distribution(
     plt.close(fig)
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -197,6 +195,7 @@ def main() -> None:
     print(f"saved: {output_pdf}")
     print(f"saved: {output_stats}")
 
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

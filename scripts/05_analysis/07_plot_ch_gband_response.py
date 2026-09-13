@@ -20,12 +20,10 @@ from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 
 
-ROOT_DIR = Path("/home/DM13/workspace/sky")
-DEFAULT_INPUT_CSV = (
-    ROOT_DIR
-    / "data/new_dataset3/lgadnet/regression_snr5_selected_v6_cemp3020_20260611/selected_all_with_egp.csv"
-)
-DEFAULT_OUTPUT_DIR = ROOT_DIR / "data/new_dataset3/lgadnet/final_validated"
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")   # <-- EDIT THIS root
+
+DEFAULT_INPUT_CSV = LGADNET_ROOT / "lgadnet_dataset/selected_samples_with_egp.csv"
+DEFAULT_OUTPUT_DIR = LGADNET_ROOT / "final_validated"
 DEFAULT_PREFIX = "ch_gband_cfe_response"
 
 WAVELENGTH_SCOPE = (3900, 8800)
@@ -289,7 +287,7 @@ def plot_profiles(panels: list[dict], profiles: list[dict], output_png: Path, ou
     plt.close(fig)
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -303,6 +301,7 @@ def main() -> None:
     print(f"saved: {output_png}")
     print(f"saved: {output_pdf}")
 
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

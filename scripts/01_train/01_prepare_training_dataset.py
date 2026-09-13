@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""一步生成 LGADNet v6 训练数据集。
+"""Build the LGADNet training dataset from raw LAMOST spectra.
 
-输出文件仅包含训练实际使用的内容：
-- selected_all.csv
-- new_dataset_train_y.csv
-- new_dataset_val_y.csv
-- new_dataset_train_x.npy
-- new_dataset_val_x.npy
+The generated files contain only what training actually uses:
+- selected_samples.csv
+- train_labels.csv
+- val_labels.csv
+- train_features.npy
+- val_features.npy
 """
 
 from __future__ import annotations
@@ -27,13 +27,17 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from tqdm import tqdm
 
 
-SKY_ROOT = Path("/home/DM13/workspace/sky")
-LGADNET_ROOT = SKY_ROOT / "data/new_dataset3/lgadnet"
-
-DEFAULT_MAPPING_CSV = SKY_ROOT / "data/mapping_result_snr5.csv"
-DEFAULT_DR12_CSV = SKY_ROOT / "data/lamost_dr12_cleaned_snr5.csv"
-DEFAULT_SPLIT_DIR = LGADNET_ROOT / "dr12_fits/split_all"
-DEFAULT_OUTPUT_DIR = LGADNET_ROOT / "regression_snr5_selected_v6_cemp3020_20260611"
+# ============================ PATH CONFIGURATION ============================
+# This script builds the LGADNet training dataset from YOUR OWN local raw
+# spectrum files, which are not distributed with the repo. Put your own
+# labels / metadata / raw-spectra files in your data directory, set
+# LGADNET_ROOT below, or override --labels-csv / --dr12-csv / --spectra-dir /
+# --output-dir on the command line.
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")           # <-- EDIT THIS root
+DEFAULT_LABEL_CSV    = LGADNET_ROOT / "target_labels.csv"   # labels of your selected sample
+DEFAULT_DR12_CSV     = LGADNET_ROOT / "dr12_metadata.csv"   # DR12 metadata of your source spectra
+DEFAULT_SPECTRA_DIR  = LGADNET_ROOT / "spectra"             # raw spectrum FITS files (in subfolders)
+DEFAULT_OUTPUT_DIR   = LGADNET_ROOT / "lgadnet_dataset"
 
 DR12_COLUMNS = [
     "obsid",
@@ -125,7 +129,7 @@ CFE_LABELS = [
 ]
 
 SNRG_BINS = [0, 10, 20, 50, 100, np.inf]
-#悬着的内容中没有小于5的，因此是5-10
+# none of the retained spectra has S/N < 5, hence the first bin range is 5-10
 SNRG_LABELS = ["5~10", "10~20", "20~50", "50~100", ">100"]
 
 WAVELENGTH_SCOPE = [3900, 8800]
@@ -139,9 +143,9 @@ def log(message: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mapping-csv", type=Path, default=DEFAULT_MAPPING_CSV)
+    parser.add_argument("--labels-csv", type=Path, default=DEFAULT_LABEL_CSV)
     parser.add_argument("--dr12-csv", type=Path, default=DEFAULT_DR12_CSV)
-    parser.add_argument("--split-dir", type=Path, default=DEFAULT_SPLIT_DIR)
+    parser.add_argument("--spectra-dir", type=Path, default=DEFAULT_SPECTRA_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--cemp-target", type=int, default=3020)
     parser.add_argument("--mp-target", type=int, default=6872)
@@ -155,7 +159,7 @@ def parse_args() -> argparse.Namespace:
 def require_columns(df: pd.DataFrame, columns: list[str], source: Path | str) -> None:
     missing = [column for column in columns if column not in df.columns]
     if missing:
-        raise ValueError(f"{source} 缺少列: {missing}")
+        raise ValueError(f"{source} missing columns: {missing}")
 
 
 def build_fits_filename(df: pd.DataFrame) -> pd.Series:
@@ -209,17 +213,17 @@ def load_dr12_metadata(dr12_csv: Path) -> pd.DataFrame:
     return df.rename(columns=rename_map)
 
 
-def find_local_fits_paths(split_dir: Path, filenames: set[str]) -> dict[str, str]:
-    if not split_dir.is_dir():
-        raise FileNotFoundError(f"split_all 目录不存在: {split_dir}")
+def find_local_fits_paths(spectra_dir: Path, filenames: set[str]) -> dict[str, str]:
+    if not spectra_dir.is_dir():
+        raise FileNotFoundError(f"spectra directory does not exist: {spectra_dir}")
 
     remaining = set(filenames)
     found: dict[str, str] = {}
 
-    for shard_dir in sorted(path for path in split_dir.iterdir() if path.is_dir()):
+    for sub_dir in sorted(path for path in spectra_dir.iterdir() if path.is_dir()):
         if not remaining:
             break
-        with os.scandir(shard_dir) as entries:
+        with os.scandir(sub_dir) as entries:
             for entry in entries:
                 if entry.name not in remaining or not entry.is_file(follow_symlinks=False):
                     continue
@@ -230,24 +234,24 @@ def find_local_fits_paths(split_dir: Path, filenames: set[str]) -> dict[str, str
     return found
 
 
-def attach_dr12_fits_paths(mapping_csv: Path, dr12_csv: Path, split_dir: Path) -> pd.DataFrame:
-    log(f"读取 mapping: {mapping_csv}")
-    mapping = pd.read_csv(mapping_csv)
-    require_columns(mapping, ["obsid"], mapping_csv)
-    mapping["obsid"] = pd.to_numeric(mapping["obsid"], errors="coerce")
-    if mapping["obsid"].isna().any():
-        raise ValueError("mapping 中存在无法转换为整数的 obsid")
-    mapping["obsid"] = mapping["obsid"].astype("int64")
+def attach_dr12_fits_paths(labels_csv: Path, dr12_csv: Path, spectra_dir: Path) -> pd.DataFrame:
+    log(f"Reading labels: {labels_csv}")
+    labels = pd.read_csv(labels_csv)
+    require_columns(labels, ["obsid"], labels_csv)
+    labels["obsid"] = pd.to_numeric(labels["obsid"], errors="coerce")
+    if labels["obsid"].isna().any():
+        raise ValueError("labels contain an obsid that cannot be converted to int")
+    labels["obsid"] = labels["obsid"].astype("int64")
 
-    log(f"读取 DR12 元数据: {dr12_csv}")
+    log(f"Reading DR12 metadata: {dr12_csv}")
     dr12 = load_dr12_metadata(dr12_csv)
 
-    log("按 obsid 合并 DR12 元数据")
-    merged = mapping.merge(dr12, on="obsid", how="left", validate="many_to_one")
+    log("Merging DR12 metadata by obsid")
+    merged = labels.merge(dr12, on="obsid", how="left", validate="many_to_one")
 
     filenames = set(merged["fits_filename"].dropna().astype(str))
-    log(f"扫描 split_all 查找本地 FITS: {len(filenames)} 个候选文件名")
-    path_map = find_local_fits_paths(split_dir, filenames)
+    log(f"Scanning spectra directory for local FITS: {len(filenames)} candidate files")
+    path_map = find_local_fits_paths(spectra_dir, filenames)
     merged["fits_source_path"] = merged["fits_filename"].map(path_map)
     merged["fits_exists"] = merged["fits_source_path"].notna()
     return merged
@@ -255,7 +259,7 @@ def attach_dr12_fits_paths(mapping_csv: Path, dr12_csv: Path, split_dir: Path) -
 
 def classify_cemp(df: pd.DataFrame) -> pd.DataFrame:
     required = ["LOGG", "TEFF", "C_FE", "FE_H", "obsid", "snrg", "z", "fits_source_path", "fits_exists"]
-    require_columns(df, required, "mapping+DR12")
+    require_columns(df, required, "merged+DR12")
 
     work = df.copy()
     for column in ["LOGG", "TEFF", "C_FE", "FE_H", "snrg", "z"]:
@@ -400,7 +404,7 @@ def split_train_val(df: pd.DataFrame, val_ratio: float, seed: int) -> tuple[pd.D
         train_df = df[df["group_id"].astype(str).isin(train_groups)].reset_index(drop=True)
         val_df = df[df["group_id"].astype(str).isin(val_groups)].reset_index(drop=True)
         return train_df, val_df
-    raise RuntimeError("无法完成 train/val 划分")
+    raise RuntimeError("unable to complete train/val split")
 
 
 def ordered_columns(df: pd.DataFrame) -> list[str]:
@@ -509,7 +513,7 @@ def process_spectrum_path(spectrum_path: Path, fallback_z: float) -> tuple[np.nd
 
 def generate_npy(csv_path: Path, output_path: Path, overwrite: bool, desc: str) -> dict[str, object]:
     if output_path.exists() and not overwrite:
-        raise FileExistsError(f"输出文件已存在；如需覆盖请加 --overwrite: {output_path}")
+        raise FileExistsError(f"Output file already exists; use --overwrite to replace: {output_path}")
 
     df = pd.read_csv(csv_path)
     require_columns(df, ["fits_source_path", "z"], csv_path)
@@ -543,31 +547,31 @@ def generate_npy(csv_path: Path, output_path: Path, overwrite: bool, desc: str) 
 
 def check_outputs(output_dir: Path, overwrite: bool) -> None:
     targets = [
-        output_dir / "selected_all.csv",
-        output_dir / "new_dataset_train_y.csv",
-        output_dir / "new_dataset_val_y.csv",
-        output_dir / "new_dataset_train_x.npy",
-        output_dir / "new_dataset_val_x.npy",
+        output_dir / "selected_samples.csv",
+        output_dir / "train_labels.csv",
+        output_dir / "val_labels.csv",
+        output_dir / "train_features.npy",
+        output_dir / "val_features.npy",
     ]
     existing = [path for path in targets if path.exists()]
     if existing and not overwrite:
         raise FileExistsError(
-            "输出文件已存在；如需覆盖请加 --overwrite: "
+            "Output file already exists; use --overwrite to replace: "
             + ", ".join(str(path) for path in existing)
         )
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     check_outputs(args.output_dir, args.overwrite)
 
-    merged = attach_dr12_fits_paths(args.mapping_csv, args.dr12_csv, args.split_dir)
-    log("清洗、去重并计算 CEMP 类别")
+    merged = attach_dr12_fits_paths(args.labels_csv, args.dr12_csv, args.spectra_dir)
+    log("Cleaning, deduplicating and computing CEMP classes")
     pool = classify_cemp(merged)
-    log(f"可用样本池: {len(pool)}")
-    log(f"类别池:\n{pool['class'].value_counts()}")
+    log(f"Available sample pool: {len(pool)}")
+    log(f"Class pool:\n{pool['class'].value_counts()}")
 
-    log("直接按 v6 规则采样")
+    log("Sampling according to the target-class rule")
     selected = build_selected(
         pool,
         cemp_target=args.cemp_target,
@@ -575,40 +579,41 @@ def main() -> None:
         other_target=args.other_target,
         seed=args.seed,
     )
-    log(f"选择集类别:\n{selected['class'].value_counts()}")
+    log(f"Selected class distribution:\n{selected['class'].value_counts()}")
 
-    log("按 group_id 划分 train/val")
+    log("Splitting train/val by group_id")
     train_df, val_df = split_train_val(selected, args.val_ratio, args.seed)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    selected_path = args.output_dir / "selected_all.csv"
-    train_y_path = args.output_dir / "new_dataset_train_y.csv"
-    val_y_path = args.output_dir / "new_dataset_val_y.csv"
-    train_x_path = args.output_dir / "new_dataset_train_x.npy"
-    val_x_path = args.output_dir / "new_dataset_val_x.npy"
+    selected_path = args.output_dir / "selected_samples.csv"
+    train_y_path = args.output_dir / "train_labels.csv"
+    val_y_path = args.output_dir / "val_labels.csv"
+    train_x_path = args.output_dir / "train_features.npy"
+    val_x_path = args.output_dir / "val_features.npy"
 
     selected.reindex(columns=ordered_columns(selected)).to_csv(selected_path, index=False)
     train_df.reindex(columns=ordered_columns(train_df)).to_csv(train_y_path, index=False)
     val_df.reindex(columns=ordered_columns(val_df)).to_csv(val_y_path, index=False)
-    log(f"写出标签: {selected_path}, {train_y_path}, {val_y_path}")
+    log(f"Writing label files: {selected_path}, {train_y_path}, {val_y_path}")
 
-    log("生成 train npy")
+    log("Generating train feature arrays (.npy)")
     train_stats = generate_npy(train_y_path, train_x_path, args.overwrite, "train spectra")
-    log(f"train npy 完成: {train_stats}")
+    log(f"train features done: {train_stats}")
 
-    log("生成 val npy")
+    log("Generating val feature arrays (.npy)")
     val_stats = generate_npy(val_y_path, val_x_path, args.overwrite, "val spectra")
-    log(f"val npy 完成: {val_stats}")
+    log(f"val features done: {val_stats}")
 
     train_val_obsid_overlap = len(set(train_df["obsid"]) & set(val_df["obsid"]))
     train_val_group_overlap = len(set(train_df["group_id"].astype(str)) & set(val_df["group_id"].astype(str)))
     log(
-        "完成: "
+        "Done: "
         f"selected={len(selected)}, train={len(train_df)}, val={len(val_df)}, "
         f"train_val_obsid_overlap={train_val_obsid_overlap}, "
         f"train_val_group_overlap={train_val_group_overlap}"
     )
 
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

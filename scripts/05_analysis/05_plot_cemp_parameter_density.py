@@ -4,7 +4,7 @@
 Plot parameter-space distribution for the final CMD-retained CEMP candidates.
 
 Input:
-  cemp_bj_robust_cmdretained_final_catalog.csv
+  cemp_final_cmdretained.csv
 
 Outputs:
   cemp_parameter_density_bj_cmdretained_final.pdf
@@ -23,14 +23,10 @@ import pandas as pd
 from scipy.stats import gaussian_kde
 
 
-INPUT_CSV = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_cmdretained_final_catalog.csv"
-)
-OUTPUT_DIR = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique"
-)
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")
+
+INPUT_CSV = LGADNET_ROOT / "final_validated" / "cemp_final_cmdretained.csv"
+OUTPUT_DIR = LGADNET_ROOT / "spatial_filtering_unique"
 
 OUT_PDF = OUTPUT_DIR / "cemp_parameter_density_bj_cmdretained_final.pdf"
 OUT_PNG = OUTPUT_DIR / "cemp_parameter_density_bj_cmdretained_final.png"

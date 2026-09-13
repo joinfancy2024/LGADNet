@@ -7,44 +7,28 @@ Input:
     cemp_bj_robust_after_apogee.csv
 
 Outputs:
-    cemp_bj_robust_final_catalog.csv
-    cemp_bj_robust_cmdretained_final_catalog.csv  (CMD-retained subset)
-    cemp_bj_robust_final_catalog_sample.csv
-    cemp_bj_robust_final_catalog_summary.txt
+    cemp_final_full.csv                      (all final after-APOGEE candidates)
+    cemp_final_cmdretained.csv  (CMD-retained subset)
+    cemp_final_catalog_sample.csv
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
-INPUT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_after_apogee.csv"
-)
-ORIG_FILE = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_unique_b_greater_30.csv"
-)
+LGADNET_ROOT = Path("/path/to/your/lgadnet_data")   # <-- EDIT THIS root
+DATA = LGADNET_ROOT
 
-OUTPUT_FULL = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_final_catalog.csv"
-)
-OUTPUT_CMDRETAINED = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_cmdretained_final_catalog.csv"
-)
-OUTPUT_SAMPLE = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_final_catalog_sample.csv"
-)
-OUTPUT_REPORT = Path(
-    "/home/DM13/workspace/sky/data/new_dataset3/lgadnet/"
-    "spatial_filtering_unique/cemp_bj_robust_final_catalog_summary.txt"
-)
+INPUT = DATA / "spatial_filtering_unique" / "cemp_bj_robust_after_apogee_with_egp.csv"
+ORIG_FILE = DATA / "spatial_filtering_unique" / "cemp_unique_b_greater_30.csv"
+
+OUTPUT_FULL = LGADNET_ROOT / "final_validated" / "cemp_final_full.csv"
+OUTPUT_CMDRETAINED = LGADNET_ROOT / "final_validated" / "cemp_final_cmdretained.csv"
+OUTPUT_SAMPLE = LGADNET_ROOT / "final_validated" / "cemp_final_catalog_sample.csv"
 
 SAMPLE_SIZE = 16
 
@@ -157,7 +141,16 @@ def main() -> int:
     out["Dist_BJ_lo_kpc"] = df["d_bj_lo_kpc"]
     out["Abs_Z_BJ_lo_kpc"] = df["abs_Z_bj_lo_kpc"]
     out["Vtan_BJ_lo_kms"] = df["Vtan_bj_lo_kms"]
-    out["BJ_geo_rel_half_width"] = df["bj_geo_rel_half_width"]
+
+    if "bj_geo_rel_half_width" in df.columns:
+        out["BJ_geo_rel_half_width"] = df["bj_geo_rel_half_width"]
+    else:
+        out["BJ_geo_rel_half_width"] = np.where(
+            df["r_med_geo"].notna() & df["r_lo_geo"].notna() & df["r_hi_geo"].notna()
+            & (df["r_med_geo"] > 0),
+            (df["r_hi_geo"] - df["r_lo_geo"]) / (2.0 * df["r_med_geo"]),
+            np.nan,
+        )
 
     if "bp_rp_0" in df.columns:
         out["BP_RP_0"] = df["bp_rp_0"]
@@ -274,14 +267,12 @@ def main() -> int:
     add(f"Sample table: {OUTPUT_SAMPLE}")
 
     report = "\n".join(lines)
-    OUTPUT_REPORT.write_text(report, encoding="utf-8")
 
     print(report)
     print("=" * 80)
     print(f"Output full catalog: {OUTPUT_FULL}")
     print(f"Output CMD-retained catalog: {OUTPUT_CMDRETAINED}")
     print(f"Output sample table: {OUTPUT_SAMPLE}")
-    print(f"Output report: {OUTPUT_REPORT}")
 
     return 0
 
