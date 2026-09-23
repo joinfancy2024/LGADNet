@@ -1,8 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-LGADNet training script (integrated implementation).
-Contains the complete implementation of the model, dataset, and training loop.
+LGADNet training script (integrated).
+
+Defines the model (IDConv dynamic conv + ResNet + Transformer), the dataset
+loader, and the full 4-parameter regression training loop (T_eff, log g,
+[Fe/H], [C/Fe]) with validation metrics and best-model checkpointing.
+
+Input:  new_dataset_train_x.npy / new_dataset_train_y.csv
+        new_dataset_val_x.npy   / new_dataset_val_y.csv
+Output: <experiment>_<n>_best_model.pth  (in --work-dir)
 """
 
 import os
@@ -24,26 +31,22 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score, confusion_matrix
 
 # =============================================================================
-# CONFIGURATION
+# 配置参数（可直接修改）
 # =============================================================================
-# The dataset is produced by 01_prepare_training_dataset.py; LGADNET_ROOT and
-# DEFAULT_OUTPUT_DIR are shared with that script. Most values below are
-# overridable with a matching command-line argument.
-import importlib
-_prepare = importlib.import_module("01_prepare_training_dataset")  # name starts with a digit -> needs importlib
-LGADNET_ROOT = _prepare.LGADNET_ROOT
-DEFAULT_OUTPUT_DIR = _prepare.DEFAULT_OUTPUT_DIR
+from pathlib import Path
+LGADNET_ROOT = Path(os.environ.get("LGADNET_ROOT", "/path/to/lgadnet_data"))
+
 CONFIG = {
-    # Experiment name
+    # 实验名称
     "experiment_name": "lgadnet_regression",
 
-    # Data paths (dataset produced by 01_prepare_training_dataset.py)
-    "train_feature_path": str(DEFAULT_OUTPUT_DIR / "train_features.npy"),
-    "train_label_path": str(DEFAULT_OUTPUT_DIR / "train_labels.csv"),
-    "test_feature_path": str(DEFAULT_OUTPUT_DIR / "val_features.npy"),
-    "test_label_path": str(DEFAULT_OUTPUT_DIR / "val_labels.csv"),
+    # 数据路径
+    "train_feature_path": str(LGADNET_ROOT / "training/train_features.npy"),
+    "train_label_path": str(LGADNET_ROOT / "training/train_labels.csv"),
+    "test_feature_path": str(LGADNET_ROOT / "training/val_features.npy"),
+    "test_label_path": str(LGADNET_ROOT / "training/val_labels.csv"),
 
-    # Model parameters
+    # 模型参数
     "num_label": 4,
     "len_spectrum": 4901,
     "hidden_channels": 64,
@@ -52,36 +55,36 @@ CONFIG = {
     "num_layers": 2,
     "dim_feedforward": 512,
 
-    # Training parameters
+    # 训练参数
     "batch_size": 32,
     "num_workers": 4,
     "max_epochs": 500,
     "lr": 0.0001,
     "weight_decay": 1e-5,
 
-    # Other settings
+    # 其他设置
     "seed": 2024,
     "log_to_console": False,
     "use_early_stopping": False,
     "early_stopping_patience": 20,
     "early_stopping_min_delta": 0.0001,
-    "work_dir": str(LGADNET_ROOT / "outputs" / "lgadnet_regression"),
+    "work_dir": str(LGADNET_ROOT / "models"),
 
-    # GPU settings
+    # GPU设置
     # "cuda_device": "0",
 }
 
 
 # =============================================================================
-# Model definition
+# 模型定义
 # =============================================================================
 
 class IDConv1dFull(nn.Module):
     """
-    Dynamic convolution (no grouped/depthwise restriction):
-      - Candidate kernels: [G, Cout, Cin, K]
-      - Per-sample mixing weights alpha in R^G yield Wmix in [B, Cout, Cin, K]
-      - Applied as a single grouped convolution with groups=B over the batch
+    非深度卷积的动态卷积：
+      - 候选核: [G, Cout, Cin, K]
+      - 每个样本生成混合系数 alpha ∈ R^G，得到 Wmix ∈ [B, Cout, Cin, K]
+      - 通过 groups=B 的一次性分组卷积施加到 batch 上
     """
     def __init__(self,
                  in_channels: int,
@@ -93,8 +96,8 @@ class IDConv1dFull(nn.Module):
                  reduction_ratio: int = 4,
                  bias: bool = True):
         super().__init__()
-        assert num_kernels > 1, "num_kernels must be > 1"
-        assert kernel_size >= 1, "kernel_size must be >= 1"
+        assert num_kernels > 1, "num_kernels 应 > 1"
+        assert kernel_size >= 1, "kernel_size 应 >=1"
         if padding is None:
             padding = kernel_size // 2
 
@@ -106,11 +109,11 @@ class IDConv1dFull(nn.Module):
         self.G = num_kernels
         self.has_bias = bias
 
-        # candidate kernels / bias
+        # 候选核/偏置
         self.weight = nn.Parameter(torch.empty(self.G, self.Cout, self.Cin, self.K))
         self.bias = nn.Parameter(torch.empty(self.G, self.Cout)) if bias else None
 
-        # gating: per-sample G-dim logits from the GAP-pooled features
+        # gating：用 GAP 的特征生成每个样本的 G 维 logits
         red = max(1, in_channels // reduction_ratio)
         self.pool = nn.AdaptiveAvgPool1d(1)
         self.gate = nn.Sequential(
@@ -133,13 +136,13 @@ class IDConv1dFull(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, Cin, L = x.shape
-        assert Cin == self.Cin, f"Cin mismatch: expected {self.Cin}, got {Cin}"
+        assert Cin == self.Cin, f"Cin 对不上: 期望 {self.Cin}, 实际 {Cin}"
 
-        # per-sample G-dim mixing weights
+        # 生成每个样本的 G 维混合系数
         g_logits = self.gate(self.pool(x)).squeeze(-1)
         alpha = torch.softmax(g_logits, dim=1)
 
-        # mix to obtain the full per-sample kernel
+        # 混合得到每个样本的完整卷积核
         Wmix = torch.einsum('bg,gock->bock', alpha, self.weight)
         Wmix = Wmix.reshape(B * self.Cout, self.Cin, self.K)
 
@@ -148,7 +151,7 @@ class IDConv1dFull(nn.Module):
         else:
             bmix = None
 
-        # a single grouped convolution with groups=B
+        # 用 groups=B 做一次性分组卷积
         y = F.conv1d(
             x.reshape(1, B * Cin, L),
             Wmix,
@@ -162,13 +165,13 @@ class IDConv1dFull(nn.Module):
 
 class ResNet1D_Block_ResDynFull(nn.Module):
     """
-    Main branch: standard convolution.
-    Residual branch: the 1x1 convolution is replaced by IDConv1dFull.
+    主分支：普通卷积
+    残差分支：1x1 卷积改用 IDConv1dFull
     """
     def __init__(self, in_channels, out_channels, stride=1,
                  num_kernels=4, reduction_ratio=4, bias=True, kernel_size=3):
         super().__init__()
-        # main branch
+        # 主分支
         self.main_path = nn.Sequential(
             nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size,
                       stride=stride, padding=kernel_size//2, bias=bias),
@@ -177,7 +180,7 @@ class ResNet1D_Block_ResDynFull(nn.Module):
                       stride=1, padding=kernel_size//2, bias=bias),
         )
 
-        # residual branch
+        # 残差分支
         if stride != 1 or in_channels != out_channels:
             self.residual_path = IDConv1dFull(
                 in_channels, out_channels,
@@ -200,9 +203,9 @@ class ResNet1D_Block_ResDynFull(nn.Module):
 
 class LGADNet(nn.Module):
     """
-    LGADNet model.
-    Six ResNet1D_Block_ResDynFull stages downsample while growing channels:
-    64, 64, 128, 128, 256, 256. A Transformer Encoder replaces the LSTM.
+    LGADNet模型
+    6个ResNet1D_Block_ResDynFull下采样并通道递增：64, 64, 128, 128, 256, 256
+    使用Transformer Encoder替换LSTM
     """
     def __init__(self,
                  num_label=4,
@@ -227,7 +230,7 @@ class LGADNet(nn.Module):
         self.num_blocks = len(self.c_list)
         self.final_c = self.c_list[-1]
 
-        # input projection
+        # 输入投影
         self.input_proj = nn.Conv1d(1, self.base_c, kernel_size=3, padding=1)
 
         # CNN Backbone
@@ -259,20 +262,20 @@ class LGADNet(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # positional encoding
+        # 位置编码
         self.pos_embedding = nn.Parameter(torch.randn(1, 1000, self.final_c))
 
-        # gating
+        # 门控
         self.transformer_gate = nn.Sequential(
             nn.Linear(self.final_c, self.final_c),
             nn.Sigmoid()
         )
 
-        # compute the downsampled length
+        # 计算下采样后的长度
         self.l_downsampled = self._compute_downsampled_length(len_spectrum, num_stages=self.num_blocks)
         flattened_dim = self.l_downsampled * self.final_c
 
-        # regressor head
+        # 回归头
         self.regressor = nn.Sequential(
             nn.Linear(flattened_dim, 1024),
             nn.BatchNorm1d(1024),
@@ -298,40 +301,40 @@ class LGADNet(nn.Module):
         x = self.input_proj(x)
         x = self.downsample_blocks(x)
 
-        # Transformer input
+        # Transformer输入
         x = x.transpose(1, 2)
         pos = self.pos_embedding[:, :x.size(1), :]
         x = x + pos
 
-        # gating
+        # 门控
         x = x * self.transformer_gate(x)
 
-        # Transformer encoding
+        # Transformer编码
         x = self.transformer(x)
 
-        # flatten + regress
+        # 展平 + 回归
         flat = x.reshape(B, -1)
         out = self.regressor(flat)
         return out
 
 
 # =============================================================================
-# Dataset definition
+# 数据集定义
 # =============================================================================
 
 class CustomDataset(Dataset):
-    """Custom dataset."""
+    """自定义数据集"""
     def __init__(self, feature_path, label_path, normalize=True):
         self.features = np.load(feature_path)
         label_df = pd.read_csv(label_path)
         self.labels = label_df[['LOGG', 'TEFF', 'C_FE', 'FE_H']].values.astype(np.float32)
 
-        # drop samples containing NaN
+        # 过滤 NaN 样本
         valid_mask = np.all(np.isfinite(self.features), axis=1) & np.all(np.isfinite(self.labels), axis=1)
         self.features = self.features[valid_mask]
         self.labels = self.labels[valid_mask]
         self.valid_indices = np.where(valid_mask)[0]
-        print(f"[INFO] Dropped NaN samples: {len(valid_mask)} -> kept {len(self.valid_indices)} (removed {len(valid_mask) - len(self.valid_indices)})")
+        print(f"[INFO] 过滤 NaN 样本: 原始 {len(valid_mask)} -> 保留 {len(self.valid_indices)} (丢弃 {len(valid_mask) - len(self.valid_indices)})")
 
         if normalize:
             self.label_mean = np.mean(self.labels, axis=0)
@@ -352,11 +355,11 @@ class CustomDataset(Dataset):
 
 
 # =============================================================================
-# Loss function definition
+# 损失函数定义
 # =============================================================================
 
 class MSELoss(nn.Module):
-    """MSE loss function."""
+    """MSE损失函数"""
     def __init__(self):
         super().__init__()
 
@@ -373,11 +376,11 @@ class MSELoss(nn.Module):
 
 
 # =============================================================================
-# Early Stopping
+# 早停机制
 # =============================================================================
 
 class EarlyStopping:
-    """Early stopping."""
+    """早停机制类"""
     def __init__(self,
                  patience: int = 20,
                  min_delta: float = 0.0001,
@@ -489,11 +492,11 @@ class EarlyStopping:
 
 
 # =============================================================================
-# Helper functions
+# 辅助函数
 # =============================================================================
 
 def setup_logger(work_dir, experiment_name, log_to_console=False):
-    """Set up logging."""
+    """设置日志"""
     log_dir = os.path.join(work_dir, 'logs')
     os.makedirs(log_dir, exist_ok=True)
 
@@ -522,7 +525,7 @@ def setup_logger(work_dir, experiment_name, log_to_console=False):
 
 
 def setup_tensorboard(work_dir, experiment_name):
-    """Set up TensorBoard."""
+    """设置TensorBoard"""
     tensorboard_dir = os.path.join(work_dir, 'tensorboard', experiment_name)
     os.makedirs(tensorboard_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=tensorboard_dir)
@@ -530,7 +533,7 @@ def setup_tensorboard(work_dir, experiment_name):
 
 
 def set_seed(seed):
-    """Set the random seed."""
+    """设置随机种子"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -541,7 +544,7 @@ def set_seed(seed):
 
 
 def classify_star(row):
-    """Classify a star by [Fe/H] < -1 and the criterion of Aoki et al. (2007)."""
+    """基于 [Fe/H] < -1 和 Aoki et al. (2007) 的准则进行分类。"""
     if row["Fe_H"] < -1.0:
         if row["logLLodot"] <= 2.3 and row["C_Fe"] >= 0.7:
             return "cemp"
@@ -552,7 +555,7 @@ def classify_star(row):
 
 
 def parse_cli_args():
-    parser = argparse.ArgumentParser(description="Train the LGADNet 4-parameter regression model")
+    parser = argparse.ArgumentParser(description="训练 LGADNet 四参数回归模型")
     parser.add_argument("--train-feature-path")
     parser.add_argument("--train-label-path")
     parser.add_argument("--test-feature-path")
@@ -590,34 +593,34 @@ def apply_cli_overrides(cfg, args):
 
 
 # =============================================================================
-# Main training function
+# 主训练函数
 # =============================================================================
 
-def main(cfg) -> int:
-    # GPU setup
+def main(cfg):
+    # 设置GPU
     # os.environ["CUDA_VISIBLE_DEVICES"] = cfg["cuda_device"]
 
-    # create the working directory
+    # 创建工作目录
     os.makedirs(cfg["work_dir"], exist_ok=True)
 
-    # initialise logging and TensorBoard
+    # 初始化日志和TensorBoard
     logger = setup_logger(cfg["work_dir"], cfg["experiment_name"], cfg["log_to_console"])
     writer = setup_tensorboard(cfg["work_dir"], cfg["experiment_name"])
 
-    # log the configuration
-    logger.info("Configuration: " + "=" * 50)
+    # 记录配置
+    logger.info("配置参数: " + "=" * 50)
     logger.info(json.dumps(cfg, indent=4, ensure_ascii=False))
     logger.info("=" * 50)
 
-    # set the random seed
+    # 设置随机种子
     set_seed(cfg["seed"])
-    logger.info(f"Random seed: {cfg['seed']}")
+    logger.info(f"随机种子设置: {cfg['seed']}")
 
-    # create a deterministic random generator
+    # 创建确定性的随机数生成器
     generator = torch.Generator()
     generator.manual_seed(cfg["seed"])
 
-    # build the model
+    # 构建模型
     model = LGADNet(
         num_label=cfg["num_label"],
         len_spectrum=cfg["len_spectrum"],
@@ -627,9 +630,9 @@ def main(cfg) -> int:
         num_layers=cfg["num_layers"],
         dim_feedforward=cfg["dim_feedforward"]
     )
-    logger.info(f"Model architecture: {model}")
+    logger.info(f"模型结构: {model}")
 
-    # load the datasets
+    # 加载数据集
     train_dataset = CustomDataset(
         feature_path=cfg["train_feature_path"],
         label_path=cfg["train_label_path"],
@@ -641,15 +644,15 @@ def main(cfg) -> int:
         normalize=False
     )
 
-    logger.info(f"Training set size: {len(train_dataset)}")
-    logger.info(f"Test set size: {len(test_dataset)}")
-    logger.info(f"Training label mean: {train_dataset.label_mean}")
-    logger.info(f"Training label std: {train_dataset.label_std}")
+    logger.info(f"训练数据集大小: {len(train_dataset)}")
+    logger.info(f"测试数据集大小: {len(test_dataset)}")
+    logger.info(f"训练数据集标签均值: {train_dataset.label_mean}")
+    logger.info(f"训练数据集标签标准差: {train_dataset.label_std}")
 
-    # standardise the test set using training-set statistics
+    # 使用训练集的统计量标准化测试集
     test_dataset.labels = (test_dataset.labels - train_dataset.label_mean) / train_dataset.label_std
 
-    # create the DataLoaders
+    # 创建DataLoader
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg["batch_size"],
@@ -666,29 +669,29 @@ def main(cfg) -> int:
         pin_memory=True
     )
 
-    logger.info(f"Training loader batches: {len(train_loader)}")
-    logger.info(f"Test loader batches: {len(test_loader)}")
+    logger.info(f"训练数据加载器批次数: {len(train_loader)}")
+    logger.info(f"测试数据加载器批次数: {len(test_loader)}")
 
-    # device setup
+    # 设备设置
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    logger.info(f"Using device: {device}")
+    logger.info(f"使用设备: {device}")
 
     if torch.cuda.is_available():
-        logger.info(f"GPU model: {torch.cuda.get_device_name(0)}")
-        logger.info(f"CUDA version: {torch.version.cuda}")
+        logger.info(f"当前GPU型号: {torch.cuda.get_device_name(0)}")
+        logger.info(f"CUDA版本: {torch.version.cuda}")
 
-    # build the optimizer
+    # 构建优化器
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg["lr"],
         weight_decay=cfg["weight_decay"]
     )
 
-    # loss function
+    # 损失函数
     criterion = MSELoss()
 
-    # early stopping
+    # 早停机制
     early_stopping = None
     if cfg["use_early_stopping"]:
         early_stopping = EarlyStopping(
@@ -699,9 +702,9 @@ def main(cfg) -> int:
             verbose=True,
             logger=logger
         )
-        logger.info(f"Early stopping enabled, patience={cfg['early_stopping_patience']}")
+        logger.info(f"启用早停机制, patience={cfg['early_stopping_patience']}")
 
-    # training loop
+    # 训练循环
     max_epochs = cfg["max_epochs"]
     best_loss = float('inf')
     model_count = 0
@@ -710,7 +713,7 @@ def main(cfg) -> int:
     std = torch.tensor(train_dataset.label_std, device=device, dtype=torch.float32)
 
     for epoch in range(max_epochs):
-        # training phase
+        # 训练阶段
         model.train()
         total_loss = 0
         total_reg_loss = 0
@@ -745,10 +748,10 @@ def main(cfg) -> int:
         print(f"Epoch {epoch+1}/{max_epochs} - Training completed.")
         print(f"  Average loss: {avg_train_loss:.4f}")
 
-        logger.info(f"Epoch {epoch+1}/{max_epochs}, average training loss: {avg_train_loss:.4f}")
+        logger.info(f"Epoch {epoch+1}/{max_epochs}, 平均训练损失: {avg_train_loss:.4f}")
         writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch)
 
-        # validation phase
+        # 验证阶段
         model.eval()
         total_val_loss = 0
         all_preds = []
@@ -772,11 +775,11 @@ def main(cfg) -> int:
         all_preds = np.concatenate(all_preds, axis=0)
         all_labels = np.concatenate(all_labels, axis=0)
 
-        # denormalise
+        # 反标准化
         all_preds_original = all_preds * train_dataset.label_std + train_dataset.label_mean
         all_labels_original = all_labels * train_dataset.label_std + train_dataset.label_mean
 
-        # compute MAE
+        # 计算MAE
         mae_original = np.mean(np.abs(all_preds_original - all_labels_original), axis=0)
         mae_normalized = np.mean(np.abs(all_preds - all_labels), axis=0)
 
@@ -784,22 +787,22 @@ def main(cfg) -> int:
         print(f"  Validation Loss: {avg_val_loss:.4f}")
         print(f"  Original MAE: {mae_original}")
 
-        logger.info(f"Epoch {epoch+1}/{max_epochs}, validation loss: {avg_val_loss:.4f}")
-        logger.info(f"Epoch {epoch+1}/{max_epochs}, raw-scale validation MAE: {mae_original}")
+        logger.info(f"Epoch {epoch+1}/{max_epochs}, 验证损失: {avg_val_loss:.4f}")
+        logger.info(f"Epoch {epoch+1}/{max_epochs}, 原始尺度验证MAE: {mae_original}")
 
-        # TensorBoard logging
+        # TensorBoard记录
         writer.add_scalar('Loss/val_epoch', avg_val_loss, epoch)
         for i, col in enumerate(['LOGG', 'TEFF', 'C_FE', 'FE_H']):
             writer.add_scalar(f'MAE_original/{col}', mae_original[i], epoch)
         writer.add_scalar('MAE_original/average', np.mean(mae_original), epoch)
 
-        # save the best model
+        # 保存最佳模型
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
             best_model_path = os.path.join(cfg["work_dir"], f"{cfg['experiment_name']}_{model_count}_best_model.pth")
             model_count += 1
 
-            # compute classification metrics
+            # 计算分类指标
             pred_df = pd.DataFrame(all_preds_original, columns=['logg', 'Teff', 'C_Fe', 'Fe_H'])
             true_df = pd.DataFrame(all_labels_original, columns=['logg', 'Teff', 'C_Fe', 'Fe_H'])
             pred_df["logLLodot"] = np.log10(0.8) - (pred_df["logg"] - 4.44) + 4.0 * np.log10(pred_df["Teff"] / 5780.0)
@@ -816,11 +819,11 @@ def main(cfg) -> int:
             precision = precision_score(true_labels, pred_labels, zero_division=0)
             f1 = f1_score(true_labels, pred_labels, zero_division=0)
 
-            logger.info(f"Metrics (positive class 'cemp'):")
-            logger.info(f"  Accuracy: {accuracy:.4f}")
-            logger.info(f"  Recall: {recall:.4f}")
-            logger.info(f"  Precision: {precision:.4f}")
-            logger.info(f"  F1 score: {f1:.4f}")
+            logger.info(f"评估指标 (正类: 'cemp'):")
+            logger.info(f"  准确率: {accuracy:.4f}")
+            logger.info(f"  召回率: {recall:.4f}")
+            logger.info(f"  精确率: {precision:.4f}")
+            logger.info(f"  F1分数: {f1:.4f}")
 
             torch.save({
                 "model_state_dict": model.state_dict(),
@@ -832,31 +835,30 @@ def main(cfg) -> int:
                 "epoch": epoch + 1,
             }, best_model_path)
             print(f"  New best model saved! Validation loss: {best_loss:.4f}")
-            logger.info(f"Saved the best model, validation loss: {best_loss:.4f}")
+            logger.info(f"保存最佳模型，验证损失: {best_loss:.4f}")
 
-        # early stopping check
+        # 早停检查
         if early_stopping is not None:
             early_stop_result = early_stopping(avg_val_loss, model, epoch+1)
             logger.info(early_stop_result['message'])
 
             if early_stop_result['should_stop']:
                 print(f"Early stopping triggered at epoch {epoch+1}!")
-                logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                logger.info(f"早停触发！在第 {epoch+1} 个epoch停止训练")
                 if early_stopping.load_best_model(model):
-                    logger.info("Restored the best model weights")
+                    logger.info("已恢复最佳模型权重")
                 break
 
         print("-" * 60)
 
-    # end of training
+    # 训练结束
     print(f"Training completed! Best validation loss: {best_loss:.4f}")
-    logger.info(f"Training finished, best validation loss: {best_loss:.4f}")
-    logger.info(f"Best model saved at: {best_model_path}")
+    logger.info(f"训练完成，最佳验证损失: {best_loss:.4f}")
+    logger.info(f"最佳模型保存在: {best_model_path}")
 
     writer.close()
     print("done")
 
-    return 0
 
 if __name__ == "__main__":
-    raise SystemExit(main(apply_cli_overrides(CONFIG, parse_cli_args())))
+    main(apply_cli_overrides(CONFIG, parse_cli_args()))

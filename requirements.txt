@@ -1,0 +1,12 @@
+# Versions observed in the active Conda base environment (Python 3.13.13).
+# Torch was observed as 2.6.0+cu124; the CUDA build may need to match the host.
+numpy==2.5.0
+pandas==3.0.3
+scipy==1.18.0
+matplotlib==3.11.0
+astropy==8.0.0
+scikit-learn==1.9.0
+torch==2.6.0
+tensorboard==2.21.0
+tqdm==4.70.1
+requests==2.33.0

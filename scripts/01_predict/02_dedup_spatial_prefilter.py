@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Append DESIG/OBJNAME from FITS headers to the CEMP candidates and
-deduplicate them by DESIG, keeping the representative observation per target."""
+"""Deduplicate CEMP candidates by DESIG and apply the |b| > 30 deg spatial pref filter.
+
+Merged from the former step-02 (dedup by DESIG + append DESIG/OBJNAME from FITS
+headers) and step-03 (compute Galactic latitude/longitude and keep |b| > 30 deg).
+Order is irrelevant because the Galactic latitude b is an intrinsic property of a
+target: all observations sharing a DESIG have the same coordinates and therefore
+the same b, so dedup-by-DESIG and the b cut commute.
+
+Input:   cemp_all.csv   (all CEMP predictions from step 01)
+Output:  cemp_unique_b_greater_30.csv  (dedup by DESIG, |b| > 30 deg kept)
+"""
 
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from astropy.coordinates import SkyCoord
 from astropy.io import fits
+import astropy.units as u
 
+LGADNET_ROOT = Path(os.environ.get("LGADNET_ROOT", "/path/to/lgadnet_data"))
+INTER = LGADNET_ROOT / "crossmatch"
+PRED = LGADNET_ROOT / "predictions"
 
-LGADNET_ROOT = Path("/path/to/your/lgadnet_data")   # <-- EDIT THIS root
-
-DEFAULT_INPUT = LGADNET_ROOT / "predictions" / "dr12_cemp_all.csv"
-DEFAULT_OUTPUT = LGADNET_ROOT / "predictions" / "dr12_cemp_unique_by_desig.csv"
+DEFAULT_INPUT = PRED / "cemp_all.csv"
+DEFAULT_OUTPUT = INTER / "cemp_unique_b_greater_30.csv"
 
 INSERT_AFTER = "source_path"
 
@@ -24,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--b-threshold", type=float, default=30.0,
+                        help="Galactic latitude threshold in degrees (default 30)")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -70,12 +86,21 @@ def main() -> int:
     df = pd.read_csv(input_path)
     if "source_path" not in df.columns:
         raise ValueError(f"input CSV is missing the source_path column: {input_path}")
+    if "ra" not in df.columns or "dec" not in df.columns:
+        raise ValueError(f"input CSV is missing ra/dec columns: {input_path}")
 
-    # Extract DESIG / OBJNAME from the FITS headers.
+    # --- Galactic coordinates ---
+    coords = SkyCoord(ra=df["ra"].values * u.deg, dec=df["dec"].values * u.deg,
+                      frame="icrs")
+    gal = coords.galactic
+    df["b"] = gal.b.deg
+    df["l"] = gal.l.deg
+
+    # --- Extract DESIG / OBJNAME from the FITS headers ---
     df["DESIG"] = df["source_path"].astype(str).map(lambda p: read_header_value(p, "DESIG"))
     df["OBJNAME"] = df["source_path"].astype(str).map(lambda p: read_header_value(p, "OBJNAME"))
 
-    # Build the sort key and deduplicate by DESIG (keep the representative observation).
+    # --- Deduplicate by DESIG (keep the representative observation) ---
     work = df.copy()
     work["DESIG"] = work["DESIG"].astype("string").fillna("").str.strip()
     work["cemp_margin"] = pd.to_numeric(work["C_FE"], errors="coerce") - pd.to_numeric(
@@ -95,17 +120,24 @@ def main() -> int:
     dedup = work.drop_duplicates(subset="DESIG", keep="first").copy()
     dedup = dedup.drop(columns=["snr_sort", "lmjd_sort", "obsid_sort"])
 
+    # --- Spatial filter: |b| > threshold ---
+    filter_mask = np.abs(dedup["b"]) > args.b_threshold
+    filtered = dedup[filter_mask].copy()
+
+    # --- Output columns ---
     output_columns = build_output_columns(list(df.columns))
     if "cemp_margin" not in df.columns and "cemp_cfe_threshold" in df.columns:
         idx = df.columns.get_loc("cemp_cfe_threshold") + 1
         output_columns.insert(idx, "cemp_margin")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    dedup.to_csv(output_path, index=False, columns=output_columns)
+    filtered.to_csv(output_path, index=False, columns=output_columns)
 
     print(f"input_rows={len(df)}")
     print(f"unique_desig_rows={len(dedup)}")
-    print(f"removed_rows={len(df) - len(dedup)}")
+    print(f"kept_after_b_cut={len(filtered)}")
+    print(f"removed_dedup={len(df) - len(dedup)}")
+    print(f"removed_b_cut={len(dedup) - len(filtered)}")
     print(f"output={output_path}")
     return 0
 
