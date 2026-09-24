@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Step 4: Build and export the final CEMP candidate sample for the paper.
+"""Step 4: Export CEMP candidates retained by the CMD selection.
 
 Reads the CMD-flagged CSV from step 03 (cmd_flags.csv), merges the four
 model-estimated stellar parameters (TEFF/LOGG/FE_H/C_FE) from the upstream
-candidate table, keeps only cmd_retained==True rows, and writes the final
-catalog used for the paper plots plus a screening summary.
+candidate table, keeps only cmd_retained==True rows, and writes the CMD-retained
+CEMP candidate table used by downstream plots plus a screening summary.
 
 Input:  cmd_flags.csv + upstream cemp_unique_b_greater_30.csv (four params)
-Output: final.csv (CMD-retained sample) + cemp_final_summary.txt.
+Output: final.csv (CMD-retained CEMP candidates) + cemp_final_summary.txt.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def main() -> int:
     cmd_has = bool_series(merged, "cmd_has_data")
     lines = [
         "=" * 80,
-        "Final CEMP Candidate Sample — Screening Summary",
+        "CMD-Retained CEMP Candidate Sample — Screening Summary",
         "=" * 80,
         f"Input rows:                {len(merged):,}",
         f"  Complete CMD data:       {cmd_has.sum():,}",
@@ -70,7 +70,7 @@ def main() -> int:
     ]
     report = "\n".join(lines)
 
-    # Final sample = CMD retained only
+    # Keep only CEMP candidates retained by the CMD selection.
     final = merged[cmd_ret].copy()
 
     # Columns the downstream plot scripts actually consume.
@@ -90,8 +90,8 @@ def main() -> int:
     out_report.write_text(report + "\n", encoding="utf-8")
 
     print(report)
-    print(f"Final sample: {len(out):,} rows")
-    print(f"Catalog:   {out_csv}")
+    print(f"CMD-retained CEMP candidates: {len(out):,} rows")
+    print(f"CMD-retained CEMP table: {out_csv}")
     print(f"Report:    {out_report}")
     print(f"Columns:   {present}")
     return 0

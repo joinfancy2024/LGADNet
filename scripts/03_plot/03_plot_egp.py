@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Rebuild: EGP distribution comparison (training CEMP vs final candidates).
+"""Rebuild: EGP distribution comparison (training CEMP vs CMD-retained candidates).
 
-Reads the training CEMP EGP table and the final med CMD-retained catalog
+Reads the training CEMP EGP table and the CMD-retained CEMP candidate table
 (having an EGP column) and draws the EGP density comparison.
 Output goes to a NEW directory; original files untouched.
 
 Input:  --train-csv  training CEMP EGP table
-        --final-csv  final catalog with an EGP column
+        --final-csv  CMD-retained CEMP candidate table with an EGP column
 Output: egp_train_vs_cemp_final_med.{pdf,png} + stats json
 """
 
@@ -84,7 +84,8 @@ def main() -> int:
     ax.hist(final, bins=args.bins, range=xlim, density=True,
             color=red, alpha=0.08, edgecolor="none")
     ax.plot(grid, kde_line(train, grid), color=blue, lw=3.0, label="Training CEMP")
-    ax.plot(grid, kde_line(final, grid), color=red, lw=3.0, label="Final candidates")
+    ax.plot(grid, kde_line(final, grid), color=red, lw=3.0,
+            label="CMD-retained CEMP candidates")
     ax.axvline(ts["p50"], color=blue, ls="--", lw=2.0, alpha=0.9)
     ax.axvline(fs["p50"], color=red, ls="--", lw=2.0, alpha=0.9)
     ax.set_xlabel("EGP", fontsize=24)
@@ -107,7 +108,7 @@ def main() -> int:
               ensure_ascii=False, indent=2)
 
     print(f"Training CEMP EGP: n={ts['n']:,}, median={ts['p50']:.3f}")
-    print(f"Final candidates EGP: n={fs['n']:,}, median={fs['p50']:.3f}")
+    print(f"CMD-retained CEMP candidates EGP: n={fs['n']:,}, median={fs['p50']:.3f}")
     print(f"PDF: {out_pdf}")
     print(f"PNG: {out_png}")
     return 0

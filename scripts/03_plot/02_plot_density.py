@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Rebuild: parameter-space density figure for the final med sample.
+"""Rebuild: parameter-space density figure for CMD-retained CEMP candidates.
 
-Reads the final med CMD-retained catalog (already carrying the four
+Reads the CMD-retained CEMP candidate table (already carrying the four
 model-estimated parameters) and draws the [Fe/H]-[C/Fe] abundance plane
 and the T_eff-log(L/L_sun) evolutionary-position panel.
 Output goes to a NEW directory; original files untouched.
 
-Input:  --in-csv  final catalog with TEFF / LOGG / FE_H / C_FE
+Input:  --in-csv  CMD-retained CEMP candidate table with TEFF / LOGG / FE_H / C_FE
 Output: cemp_final_med_parameter_density.{pdf,png} + stats json
 """
 
@@ -135,7 +135,7 @@ def main() -> int:
               ensure_ascii=False, indent=2)
 
     print("=" * 70)
-    print("Final med parameter-space plot")
+    print("CMD-retained CEMP parameter-space plot")
     print("=" * 70)
     print(f"Input rows: {len(df):,}")
     print(f"Valid parameter rows: {len(work):,}")
